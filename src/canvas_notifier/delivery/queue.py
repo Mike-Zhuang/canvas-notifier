@@ -162,6 +162,7 @@ async def enqueue(
         rule_text = "每日摘要" if mode == "digest" else "即时事件通知"
     payload = {
         "kind": kind,
+        "canvas_origin": settings.canvas_base_url,
         "label": LABELS.get(kind, kind.replace("_", " ")),
         "title": re.sub(r"[\r\n]+", " ", title)[:200],
         "course": course.data.get("name", "") if course else "",

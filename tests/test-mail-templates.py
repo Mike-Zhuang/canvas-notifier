@@ -72,3 +72,8 @@ def test_mail_html_drops_tracking_images_and_credential_links():
     )
     assert "<script" not in html and "<img" not in html and "javascript:" not in html and "secret" not in html
     assert 'href="https://example.org/course"' in html
+
+
+def test_relative_canvas_body_links_are_absolute():
+    rendered = present(payload(excerpt='<p><a href="/courses/1/files/3">课程资料</a></p>'))
+    assert 'href="https://canvas.tongji.edu.cn/courses/1/files/3"' in rendered["excerpt"]

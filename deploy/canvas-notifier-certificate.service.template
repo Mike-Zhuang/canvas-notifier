@@ -1,0 +1,11 @@
+[Unit]
+Description=Renew Canvas Notifier HTTPS Certificate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/canvas-notifier/runtime/acme/bin/certbot renew --cert-name __DOMAIN__ --quiet --deploy-hook "/usr/bin/nginx -t && /usr/bin/nginx -s reload"
+NoNewPrivileges=true
+PrivateTmp=true

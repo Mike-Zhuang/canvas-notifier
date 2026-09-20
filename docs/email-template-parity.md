@@ -4,6 +4,8 @@
 
 | 上游模板 | 保留的可见信息 | 本服务补充 |
 |---|---|---|
+| `assignment_created.email.*` / `assignment_changed.email.*` | 课程、作业名称、变更说明、截止或未设日期、查看入口 | 完整任务说明、停止提交/开放时间、提交状态、规则说明 |
+| `upcoming_assignment_alert.email.*` | 任务、正式截止、查看入口 | 剩余时间、停止提交提醒、最近同步与补偿说明 |
 | `assignment_graded.email.*` | 课程、作业标题、成绩已可见说明、作业入口 | 成绩变化前后值（受隐私开关控制）、满分、提交状态、同步时间 |
 | `assignment_due_date_changed.email.*` | 课程、任务、调整后的截止或未设置日期 | 调整前后对比、停止提交/开放时间、重新生成提醒计划 |
 | `assignment_submitted.email.*` | 提交说明、对应任务/提交入口 | 最近同步、提交时间、重做和豁免状态 |

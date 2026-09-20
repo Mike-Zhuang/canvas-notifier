@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Canvas Notifier Certificate Twice Daily
+
+[Timer]
+OnCalendar=*-*-* 02,14:15:00 UTC
+Persistent=true
+RandomizedDelaySec=1800
+Unit=canvas-notifier-certificate.service
+
+[Install]
+WantedBy=timers.target

@@ -1,6 +1,8 @@
 """邮件信息模型：保留 Canvas 通知要素，并补充本服务的时间、状态与审计信息。"""
 
-from urllib.parse import quote
+import html
+import re
+from urllib.parse import quote, urljoin, urlsplit
 from zoneinfo import ZoneInfo
 
 import bleach
@@ -94,7 +96,18 @@ def present(payload, *, now=None):
     )
     p["observed_display"] = timestamp(p.get("observed_at") or now.isoformat())
     p["changes_text"] = format_changes(p.get("changes") or {}, p.get("timezone", "Asia/Shanghai"))
+    origin = p.get("canvas_origin") or "https://" + (
+        urlsplit(p.get("link") or "https://canvas.tongji.edu.cn").netloc
+    )
     p["excerpt"] = clean_email_html(p.get("excerpt") or "")
+    # 上游邮件会把课程正文中的相对链接补成绝对地址，邮箱中不能保留站内相对路径。
+    p["excerpt"] = re.sub(
+        r'href="([^"]*)"',
+        lambda match: (
+            'href="' + html.escape(urljoin(origin + "/", html.unescape(match[1])), quote=True) + '"'
+        ),
+        p["excerpt"],
+    )
     p["excerpt_text"] = bleach.clean(p["excerpt"], tags=set(), strip=True)
     kind = p.get("kind", "")
     descriptions = {
