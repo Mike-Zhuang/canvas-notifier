@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Canvas Notifier Backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+Unit=canvas-notifier-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,38 @@
+# 私密输入：原始抓包、计划、凭据，禁止发布
+/har/
+*.har
+/Tongji_Canvas_Enhancement_Plan*.md
+/*Canvas*Plan*.md
+/secrets/
+.env
+.env.*
+!/.env.example
+*storage-state*.json
+*cookies*.json
+*.pem
+*.key
+# 本地运行数据、邮件、日志、备份、参考 checkout
+/.local/
+/data/
+/backups/
+*.db
+*.db-*
+*.sqlite*
+*.log
+*.eml
+# 工具缓存
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+.DS_Store
+# 本地验证报告可能含个人课程数据
+/verification-private/
+/*.dump
+/*.sql.gz

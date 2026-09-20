@@ -1,0 +1,26 @@
+[Unit]
+Description=Canvas Notifier Polling and Delivery Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=canvas-notifier
+Group=canvas-notifier
+WorkingDirectory=/opt/canvas-notifier/current
+EnvironmentFile=/etc/canvas-notifier/service.env
+ExecStart=/opt/canvas-notifier/current/.venv/bin/canvas-notifier worker
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=45
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/canvas-notifier /etc/canvas-notifier/secrets
+MemoryMax=300M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

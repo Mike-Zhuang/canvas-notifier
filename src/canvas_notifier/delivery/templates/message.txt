@@ -1,0 +1,40 @@
+Canvas · {{ label }}
+{{ course }}
+{{ title }}
+
+{{ explanation }}
+{% if boundary_display %}
+{{ label }}：{{ boundary_display }}（{{ timezone }}）
+{{ remaining }}
+{% if no_due %}老师未设置正式截止，本次依据停止提交时间提醒。{% endif %}
+{% endif %}
+{% for name,value in facts %}{{ name }}：{{ value }}
+{% endfor %}
+{% if changes_text %}
+变化详情
+{{ changes_text }}
+{% endif %}
+{% if excerpt_text %}
+课程内容与反馈
+{{ excerpt_text }}
+{% endif %}
+{% for attachment in attachments %}
+附件：{{ attachment.name }}（{{ attachment.size_display }}）
+{{ attachment.link }}
+{% endfor %}
+{% for item in digest_items|default([]) %}
+{{ item.course }} · {{ item.label }} · {{ item.title }}
+{% for name,value in item.facts %}{{ name }}：{{ value }}
+{% endfor %}{{ item.changes_text }}
+{{ item.excerpt_text }}
+{% for a in item.attachments %}附件：{{ a.name }}（{{ a.size_display }}） {{ a.link }}
+{% endfor %}{{ item.link }}
+{% endfor %}
+{% if link %}
+在 Canvas 中查看：{{ link }}
+{% endif %}
+发现时间：{{ observed_display }}（{{ timezone }}）
+最近成功同步：{{ last_synced_display }}
+本次规则：{{ rule_text }}
+提交状态以最近同步为准。本服务不代表学校官方通知，回复本邮件不会发送给老师。
+管理提醒与收件设置：{{ manage_url }}

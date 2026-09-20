@@ -1,0 +1,16 @@
+[Unit]
+Description=Canvas Notifier Database Backup and Verification
+
+[Service]
+Type=oneshot
+User=canvas-notifier
+Group=canvas-notifier
+WorkingDirectory=/opt/canvas-notifier/current
+EnvironmentFile=/etc/canvas-notifier/service.env
+ExecStart=/opt/canvas-notifier/current/.venv/bin/python scripts/backup.py --verify
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/canvas-notifier

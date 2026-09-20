@@ -1,0 +1,2 @@
+// Synthetic public key only; generated for parser regression.
+encrypt.setPublicKey("MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC2VjskyJwUyBKBMEm6+ToPo/zcH8RG3B27oSpMeYuBA8xm31TQOtm3d7P4ZiYSyLNZaAnZX56OEybh3Vf4gFNc6vVS2dzVJusrKrbYcHvAmEchshpCfFnDyfkPN61Kiu1jg6xH//Vl8U02QeLaVWthBGXkhKHRBaDC2cEYURRYEwIDAQAB");
