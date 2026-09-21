@@ -1,16 +1,73 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ label }} · {{ title }}</title></head>
-<body style="margin:0;padding:0;background-color:#f4f5f7;color:#22252a;font-family:Arial,'PingFang SC','Microsoft YaHei',sans-serif;line-height:1.7">
-<div style="display:none;max-height:0;overflow:hidden;mso-hide:all">{{ preheader }}</div>
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:24px 12px">
-<table role="presentation" width="640" cellpadding="0" cellspacing="0" style="width:100%;max-width:640px;background:#fff;border:1px solid #e3e5e8;border-radius:10px">
-<tr><td style="padding:24px 28px;border-bottom:1px solid #e6e8eb"><table role="presentation" width="100%"><tr><td style="font-size:20px;font-weight:bold;color:#883253">Canvas 通知</td><td align="right" style="font-size:12px;color:#5c626b">个人学习动态</td></tr></table></td></tr>
-<tr><td style="padding:28px"><p style="margin:0 0 8px;color:#883253;font-size:13px;font-weight:bold">{{ label }}</p>{% if course %}<p style="margin:0 0 8px;font-size:13px;color:#5c626b">{{ course }}</p>{% endif %}<h1 style="font-size:24px;line-height:1.45;margin:0 0 16px;overflow-wrap:anywhere">{{ title }}</h1><p style="margin:0 0 20px">{{ explanation }}</p>
-{% if boundary_display %}<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#faf1f5;border-radius:6px;margin-bottom:20px"><tr><td style="padding:18px"><strong style="font-size:20px;color:#883253">{{ remaining }}</strong><br>{{ label }}：{{ boundary_display }}<br><span style="font-size:12px;color:#5c626b">{{ timezone }}</span>{% if no_due %}<p style="margin:10px 0 0;font-size:13px">老师未设置正式截止；本次依据停止提交时间提醒。</p>{% endif %}</td></tr></table>{% endif %}
-{% if facts %}<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-bottom:22px">{% for name,value in facts %}<tr><th align="left" valign="top" style="width:100px;padding:10px 8px 10px 0;border-bottom:1px solid #eceef0;font-weight:normal;font-size:13px;color:#5c626b">{{ name }}</th><td style="padding:10px 0;border-bottom:1px solid #eceef0;font-size:14px">{{ value }}</td></tr>{% endfor %}</table>{% endif %}
-{% if changes_text %}<h2 style="font-size:16px;margin:24px 0 10px">变化详情</h2><div style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px">{{ changes_text }}</div>{% endif %}
-{% if excerpt %}<h2 style="font-size:16px;margin:24px 0 10px">课程内容与反馈</h2><div style="font-size:14px;overflow-wrap:anywhere;max-width:100%">{{ excerpt | safe }}</div>{% endif %}
-{% if attachments %}<h2 style="font-size:16px;margin:24px 0 10px">附件</h2><ul style="padding-left:20px">{% for attachment in attachments %}<li>{% if attachment.link %}<a href="{{ attachment.link }}" style="color:#883253">{{ attachment.name }}</a>{% else %}{{ attachment.name }}{% endif %} <span style="font-size:12px;color:#5c626b">（{{ attachment.size_display }}）</span></li>{% endfor %}</ul>{% endif %}
-{% for item in digest_items|default([]) %}<div style="border-top:1px solid #e6e8eb;margin-top:24px;padding-top:18px"><p style="font-size:12px;color:#5c626b;margin:0">{{ item.course }} · {{ item.label }}</p><h2 style="font-size:17px;margin:6px 0">{{ item.title }}</h2>{% for name,value in item.facts %}<p style="margin:4px 0;font-size:13px"><strong>{{ name }}：</strong>{{ value }}</p>{% endfor %}{% if item.changes_text %}<div style="white-space:pre-wrap;font-size:13px">{{ item.changes_text }}</div>{% endif %}{% for a in item.attachments %}<p style="font-size:13px">附件：<a href="{{ a.link }}" style="color:#883253">{{ a.name }}</a>（{{ a.size_display }}）</p>{% endfor %}{% if item.excerpt %}<div style="font-size:14px">{{ item.excerpt|safe }}</div>{% endif %}{% if item.link %}<a href="{{ item.link }}" style="color:#883253">查看这项更新 →</a>{% endif %}</div>{% endfor %}
-{% if link %}<table role="presentation" cellpadding="0" cellspacing="0" style="margin-top:26px"><tr><td bgcolor="#883253" style="border-radius:6px;padding:11px 22px"><a href="{{ link }}" style="color:#fff;text-decoration:none;font-weight:bold">在 Canvas 中查看</a></td></tr></table><p style="font-size:11px;color:#5c626b;overflow-wrap:anywhere;margin:12px 0 0">按钮无法打开时：<a href="{{ link }}" style="color:#883253">{{ link }}</a></p>{% endif %}</td></tr>
-<tr><td style="padding:22px 28px;background:#fafbfc;border-top:1px solid #e6e8eb;font-size:12px;color:#5c626b"><p style="margin:0">发现时间：{{ observed_display }}（{{ timezone }}）<br>最近成功同步：{{ last_synced_display }}<br>本次规则：{{ rule_text }}</p><p style="margin:12px 0">提交状态以最近同步为准。此邮件由你的个人通知服务发送，不代表学校官方通知。回复本邮件不会发送给老师。</p><a href="{{ manage_url }}" style="color:#883253">管理提醒与收件设置</a></td></tr>
-</table></td></tr></table></body></html>
+<!doctype html>
+<html lang="zh-CN" dir="ltr">
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<title>{{ label }} · {{ title }}</title>
+<style type="text/css">
+body,table,td,th,p,a { -webkit-text-size-adjust:100%; -ms-text-size-adjust:100%; }
+table { mso-table-lspace:0pt; mso-table-rspace:0pt; }
+.ExternalClass { width:100%; }
+.ExternalClass, .ExternalClass p, .ExternalClass span, .ExternalClass td, .ExternalClass div { line-height:100%; }
+a { color:#075985; }
+.mail-content table { max-width:100%; border-collapse:collapse; }
+.mail-content td,.mail-content th { padding:6px 8px; border:1px solid #dddddd; }
+.mail-content pre { white-space:pre-wrap; word-wrap:break-word; }
+@media only screen and (max-width:620px) {
+  table.body p,table.body ul,table.body ol,table.body td,table.body th,table.body span,table.body a { font-size:16px !important; }
+  table.body .outer-cell { padding:0 !important; }
+  table.body .main-cell { padding:10px !important; }
+  table.body .facts-label { width:112px !important; }
+  table.body h1 { font-size:20px !important; }
+}
+</style>
+</head>
+<body style="Margin:0;padding:0;background:#ffffff;font-family:'Open Sans','Lucida Grande','Segoe UI',Arial,'PingFang SC',sans-serif;font-size:14px;line-height:1.5;color:#444444;-webkit-font-smoothing:antialiased;">
+<div style="display:none;font-size:1px;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all">{{ preheader }}</div>
+<table role="presentation" class="body" width="100%" border="0" cellpadding="0" cellspacing="0" style="width:100%;background:#ffffff;border-collapse:collapse"><tr><td class="outer-cell" align="center" style="padding:10px">
+<!--[if mso]><table role="presentation" width="600" align="center" border="0" cellpadding="0" cellspacing="0"><tr><td><![endif]-->
+<table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" style="width:100%;max-width:600px;background:#ffffff;border-collapse:collapse"><tr><td class="main-cell" style="padding:20px;font-family:'Open Sans','Segoe UI',Arial,'PingFang SC',sans-serif;font-size:14px;line-height:1.5;color:#444444">
+<p style="Margin:0 0 12px;color:#666666;font-size:13px">{{ label }}{% if course %} · {{ course }}{% endif %}</p>
+<h1 dir="auto" style="font-size:20px;line-height:1.4;Margin:0 0 16px;font-weight:bold;word-wrap:break-word;overflow-wrap:anywhere">{{ title }}</h1>
+<p style="Margin:0 0 18px">{{ explanation }}</p>
+{% if boundary_display %}
+<table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" style="border-collapse:collapse;border-top:1px solid #dddddd;border-bottom:1px solid #dddddd;Margin:0 0 18px"><tr><td style="padding:14px 0;font-size:14px;line-height:1.6"><strong style="font-size:18px">{{ remaining }}</strong><br>{{ label }}：{{ boundary_display }}（{{ timezone }}）{% if no_due %}<p style="Margin:8px 0 0">老师未设置正式截止；本次依据停止提交时间提醒。</p>{% endif %}</td></tr></table>
+{% endif %}
+{% if facts %}
+<table width="100%" border="0" cellpadding="0" cellspacing="0" style="border-collapse:collapse;Margin:0 0 20px">
+{% for name,value in facts %}<tr><th class="facts-label" align="left" valign="top" style="width:116px;padding:8px 12px 8px 0;border-bottom:1px solid #eeeeee;font-size:14px;font-weight:normal;color:#666666">{{ name }}</th><td dir="auto" style="padding:8px 0;border-bottom:1px solid #eeeeee;font-size:14px;line-height:1.5;word-wrap:break-word;overflow-wrap:anywhere">{{ value }}</td></tr>{% endfor %}
+</table>
+{% endif %}
+{% if author_email or author_profile_url or author_avatar_url %}
+<p style="Margin:8px 0 18px;word-wrap:break-word;overflow-wrap:anywhere">{% if author_email %}作者邮箱：<a href="mailto:{{ author_email }}" style="color:#075985;text-decoration:underline">{{ author_email }}</a><br>{% endif %}{% if author_profile_url %}<a href="{{ author_profile_url }}" style="color:#075985;text-decoration:underline">查看作者资料</a>{% endif %}{% if author_profile_url and author_avatar_url %} · {% endif %}{% if author_avatar_url %}<a href="{{ author_avatar_url }}" style="color:#075985;text-decoration:underline">查看作者头像</a>{% endif %}</p>
+{% endif %}
+{% if changes_text %}<h2 style="font-size:16px;Margin:22px 0 8px">变化详情</h2><div dir="auto" style="white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere;font-size:14px;line-height:1.6">{{ changes_text }}</div>{% endif %}
+{% if excerpt or media_text %}<h2 style="font-size:16px;Margin:22px 0 8px">课程内容与反馈</h2>{% endif %}
+{% if excerpt %}<div class="mail-content" dir="auto" style="font-size:14px;line-height:1.6;word-wrap:break-word;overflow-wrap:anywhere">{{ excerpt|safe }}</div>{% endif %}
+{% if media_text %}<p style="Margin:12px 0">{{ media_text }}{% if media_name %}<br>媒体名称：{{ media_name }}{% endif %}</p>{% endif %}
+{% if attachments %}
+<table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" style="Margin:20px 0;border:1px solid #eeeeee;background:#f7f7f7"><tr><td style="padding:12px;font-size:14px"><strong>附件</strong><ul style="Margin:8px 0 0;padding-left:20px">{% for attachment in attachments %}<li style="Margin:4px 0;word-wrap:break-word;overflow-wrap:anywhere">{% if attachment.link %}<a href="{{ attachment.link }}" style="color:#075985;text-decoration:underline">{{ attachment.name }}</a>{% else %}{{ attachment.name }}{% endif %}（{{ attachment.size_display }}）</li>{% endfor %}</ul></td></tr></table>
+{% endif %}
+{% for item in digest_items|default([]) %}
+<div style="border-top:1px solid #dddddd;Margin-top:24px;padding-top:16px">
+<p style="Margin:0 0 6px;color:#666666">{{ item.course }} · {{ item.label }}</p><h2 dir="auto" style="font-size:17px;Margin:6px 0;word-wrap:break-word">{{ item.title }}</h2>
+{% for name,value in item.facts %}<p style="Margin:4px 0"><strong>{{ name }}：</strong>{{ value }}</p>{% endfor %}
+{% if item.author_email %}<p>作者邮箱：<a href="mailto:{{ item.author_email }}">{{ item.author_email }}</a></p>{% endif %}
+{% if item.author_profile_url %}<p><a href="{{ item.author_profile_url }}">查看作者资料</a></p>{% endif %}{% if item.author_avatar_url %}<p><a href="{{ item.author_avatar_url }}">查看作者头像</a></p>{% endif %}
+{% if item.changes_text %}<div dir="auto" style="white-space:pre-wrap;word-wrap:break-word">{{ item.changes_text }}</div>{% endif %}
+{% if item.excerpt %}<div class="mail-content" dir="auto">{{ item.excerpt|safe }}</div>{% endif %}
+{% if item.media_text %}<p>{{ item.media_text }} {{ item.media_name }}</p>{% endif %}
+{% for a in item.attachments %}<p>附件：{% if a.link %}<a href="{{ a.link }}">{{ a.name }}</a>{% else %}{{ a.name }}{% endif %}（{{ a.size_display }}）</p>{% endfor %}
+<p style="font-size:12px;color:#666666">发现时间：{{ item.observed_display }}（{{ item.timezone }}）</p>
+{% if item.link %}<p><a href="{{ item.link }}" style="color:#075985;text-decoration:underline">{{ item.action_text }}</a></p>{% endif %}
+</div>
+{% endfor %}
+{% if link %}<p style="Margin:24px 0 10px"><a href="{{ link }}" style="color:#075985;text-decoration:underline;font-weight:bold">{{ action_text }}</a></p><p style="font-size:12px;color:#666666;Margin:0;word-wrap:break-word;overflow-wrap:anywhere">{{ link }}</p>{% endif %}
+<table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" style="Margin-top:24px;border-top:1px solid #dddddd"><tr><td style="padding-top:14px;font-size:12px;line-height:1.7;color:#666666">系统发现时间：{{ observed_display }}（{{ timezone }}）<br>最近成功同步：{{ last_synced_display }}<br>邮件生成时间：{{ rendered_display }}<br>本次规则：{{ rule_text }}<p style="Margin:10px 0 0">系统发现时间不等于老师上传或修改时间。提交状态以最近同步为准。</p></td></tr></table>
+</td></tr>
+<tr><td align="center" style="padding:10px 20px;font-size:16px;font-weight:bold;color:#555555">Canvas 通知 · 个人服务</td></tr>
+<tr><td align="center" style="padding:4px 20px 18px;font-size:12px;line-height:1.7;color:#666666">{% if link %}<a href="{{ link }}" style="color:#075985;text-decoration:underline">{{ action_text }}</a> &nbsp;|&nbsp; {% endif %}<a href="{{ manage_url }}" style="color:#075985;text-decoration:underline">管理提醒与收件设置</a><p style="Margin:10px 0 0">本服务不代表学校官方通知。回复本邮件不会发送给老师。</p></td></tr>
+</table>
+<!--[if mso]></td></tr></table><![endif]-->
+</td></tr></table>
+</body></html>

@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 
 import bleach
 
+from canvas_notifier.domain.mail_metadata import feedback_metadata, source_time
 from canvas_notifier.domain.time import parse_time
 
 COMMON = {
@@ -207,11 +208,15 @@ def normalize(kind: str, data: dict, origin: str, course_id="") -> dict:
     if isinstance(data.get("attachment"), dict):
         attachments.append(data["attachment"])
     result["_email"] = {
+        "source_created_at": source_time(data.get("created_at")),
+        "source_updated_at": source_time(data.get("updated_at")),
+        "source_modified_at": source_time(data.get("modified_at")),
+        "source_published_at": source_time(data.get("posted_at")),
         "body": clean_email_html(data.get("message") or data.get("description") or data.get("body") or ""),
         "attachments": [{k: a.get(k) for k in ("id", "display_name", "size")} for a in attachments],
         "comments": {
             str(c["id"]): {
-                "author_name": c.get("author_name"),
+                **feedback_metadata(c, origin),
                 "body": clean_email_html(c.get("comment") or ""),
                 "attachments": [
                     {k: a.get(k) for k in ("id", "display_name", "size")} for a in c.get("attachments") or []

@@ -10,6 +10,13 @@ Canvas · {{ label }}
 {% endif %}
 {% for name,value in facts %}{{ name }}：{{ value }}
 {% endfor %}
+{% if author_email %}作者邮箱：{{ author_email }}
+{% endif %}{% if author_profile_url %}作者资料：{{ author_profile_url }}
+{% endif %}{% if author_avatar_url %}作者头像：{{ author_avatar_url }}
+{% endif %}
+{% if media_text %}{{ media_text }}
+{% if media_name %}媒体名称：{{ media_name }}{% endif %}
+{% endif %}
 {% if changes_text %}
 变化详情
 {{ changes_text }}
@@ -27,14 +34,20 @@ Canvas · {{ label }}
 {% for name,value in item.facts %}{{ name }}：{{ value }}
 {% endfor %}{{ item.changes_text }}
 {{ item.excerpt_text }}
+{% if item.author_email %}作者邮箱：{{ item.author_email }}{% endif %}
+{% if item.author_profile_url %}作者资料：{{ item.author_profile_url }}{% endif %}
+{% if item.author_avatar_url %}作者头像：{{ item.author_avatar_url }}{% endif %}
+{% if item.media_text %}{{ item.media_text }} {{ item.media_name }}{% endif %}
+系统发现时间：{{ item.observed_display }}（{{ item.timezone }}）
 {% for a in item.attachments %}附件：{{ a.name }}（{{ a.size_display }}） {{ a.link }}
 {% endfor %}{{ item.link }}
 {% endfor %}
 {% if link %}
-在 Canvas 中查看：{{ link }}
+{{ action_text }}：{{ link }}
 {% endif %}
-发现时间：{{ observed_display }}（{{ timezone }}）
+系统发现时间：{{ observed_display }}（{{ timezone }}）
 最近成功同步：{{ last_synced_display }}
+邮件生成时间：{{ rendered_display }}
 本次规则：{{ rule_text }}
-提交状态以最近同步为准。本服务不代表学校官方通知，回复本邮件不会发送给老师。
+系统发现时间不等于老师上传或修改时间。提交状态以最近同步为准。本服务不代表学校官方通知，回复本邮件不会发送给老师。
 管理提醒与收件设置：{{ manage_url }}

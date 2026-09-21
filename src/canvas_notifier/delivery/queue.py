@@ -126,11 +126,10 @@ async def enqueue(
             Resource, f"assignment:{resource.course_id}:{data.get('assignment_id')}"
         )
         if assignment:
-            title, data = (
-                assignment.data.get("name", title),
-                {**data, "html_url": assignment.data.get("html_url", "")},
-            )
-    link = resource_link(assignment or resource, settings.canvas_base_url) if resource else ""
+            title = assignment.data.get("name", title)
+    link = resource_link(resource, settings.canvas_base_url) if resource else ""
+    if not link and assignment:
+        link = resource_link(assignment, settings.canvas_base_url)
     submission = resource if resource and resource.kind == "submission" else None
     if assignment and submission is None:
         submission = await session.get(
@@ -180,6 +179,23 @@ async def enqueue(
         "points_possible": task_data.get("points_possible"),
         "file_size": data.get("size") if resource and resource.kind == "file" else None,
         "author": comment_data.get("author_name") or feedback.get("author_name"),
+        "resource_kind": resource.kind if resource else "",
+        "source_created_at": email_data.get("source_created_at"),
+        "source_modified_at": email_data.get("source_modified_at") or data.get("modified_at"),
+        "source_updated_at": email_data.get("source_updated_at") or data.get("updated_at"),
+        "source_published_at": email_data.get("source_published_at") or data.get("posted_at"),
+        **{
+            key: comment_data.get(key)
+            for key in (
+                "author_email",
+                "author_profile_url",
+                "author_avatar_url",
+                "media_kind",
+                "media_name",
+                "feedback_created_at",
+                "feedback_edited_at",
+            )
+        },
         "attachments": attachments,
         "rule_text": rule_text,
         "last_synced_at": resource.last_seen.isoformat() if resource else None,

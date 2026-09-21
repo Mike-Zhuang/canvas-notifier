@@ -226,3 +226,15 @@ async def test_mail_metadata_upgrade_does_not_emit_old_content(sessions, setting
         assert resource.version == 1
         assert "<table>" in resource.data["_email"]["body"]
         assert not (await db.scalars(select(Event))).all()
+
+
+async def test_source_timestamp_metadata_backfill_does_not_notify(sessions, settings):
+    raw = {"id": "12", "display_name": "Synthetic file.pdf", "size": 4096, "updated_at": NOW.isoformat()}
+    async with sessions() as db, db.begin():
+        await apply(db, settings, [raw], kind="file")
+        row = await db.get(Resource, "file:1:12")
+        version = row.version
+        await apply(db, settings, [{**raw, "created_at": (NOW - timedelta(days=1)).isoformat()}], kind="file")
+        assert row.version == version
+        assert row.data["_email"]["source_created_at"]
+        assert not (await db.scalars(select(Event))).all()

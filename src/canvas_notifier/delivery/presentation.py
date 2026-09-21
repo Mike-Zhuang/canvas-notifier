@@ -2,18 +2,22 @@
 
 import html
 import re
+from html.parser import HTMLParser
 from urllib.parse import quote, urljoin, urlsplit
 from zoneinfo import ZoneInfo
 
-import bleach
-
 from canvas_notifier.delivery.formatting import format_changes
+from canvas_notifier.domain.mail_metadata import visible_email, visible_url
 from canvas_notifier.domain.normalize import clean_email_html, safe_link
 from canvas_notifier.domain.time import now_utc, parse_time
 
 
 def resource_link(resource, origin):
     data = resource.data
+    if resource.kind == "submission":
+        assignment_id, user_id = str(data.get("assignment_id", "")), str(data.get("user_id", ""))
+        if resource.course_id.isdigit() and assignment_id.isdigit() and user_id.isdigit():
+            return f"{origin}/courses/{resource.course_id}/assignments/{assignment_id}/submissions/{user_id}"
     existing = safe_link(data.get("html_url"), origin)
     if existing:
         return existing
@@ -68,6 +72,41 @@ def submission_status(data):
     return "尚未确认完成，请以 Canvas 当前状态为准"
 
 
+class PlainTextBody(HTMLParser):
+    """保留纯文本邮件中的段落、表格行与链接地址。"""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.anchor = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"p", "div", "h2", "h3", "h4", "tr", "br", "blockquote", "pre"}:
+            self.parts.append("\n")
+        elif tag == "li":
+            self.parts.append("\n• ")
+        elif tag in {"td", "th"}:
+            self.parts.append(" | ")
+        elif tag == "a":
+            self.anchor = dict(attrs).get("href")
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self.anchor:
+            self.parts.append(" (" + self.anchor + ")")
+            self.anchor = None
+        elif tag in {"p", "div", "li", "tr", "h2", "h3", "h4", "blockquote", "pre"}:
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        self.parts.append(data)
+
+
+def email_body_text(fragment):
+    parser = PlainTextBody()
+    parser.feed(fragment)
+    return re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", "".join(parser.parts)).strip()
+
+
 def present(payload, *, now=None):
     now = now or now_utc()
     p = dict(payload)
@@ -94,7 +133,8 @@ def present(payload, *, now=None):
     p["last_synced_display"] = (
         timestamp(p.get("last_synced_at")) if p.get("last_synced_at") else "本地测试 / 运维通知"
     )
-    p["observed_display"] = timestamp(p.get("observed_at") or now.isoformat())
+    p["observed_display"] = timestamp(p.get("observed_at")) if p.get("observed_at") else "未记录"
+    p["rendered_display"] = timestamp(now.isoformat())
     p["changes_text"] = format_changes(p.get("changes") or {}, p.get("timezone", "Asia/Shanghai"))
     origin = p.get("canvas_origin") or "https://" + (
         urlsplit(p.get("link") or "https://canvas.tongji.edu.cn").netloc
@@ -108,7 +148,7 @@ def present(payload, *, now=None):
         ),
         p["excerpt"],
     )
-    p["excerpt_text"] = bleach.clean(p["excerpt"], tags=set(), strip=True)
+    p["excerpt_text"] = email_body_text(p["excerpt"])
     kind = p.get("kind", "")
     descriptions = {
         "assignment_created": "课程发布了一项新的作业或测验。请查看任务说明和适用时间。",
@@ -118,7 +158,7 @@ def present(payload, *, now=None):
         "grade_changed": "学生可见成绩发生了变化。",
         "announcement_created": "课程发布了一条新公告。",
         "announcement_changed": "这条课程公告已更新。",
-        "file_created": "老师在课程中添加了新文件。",
+        "file_created": "本次同步发现课程新增了文件。上传/创建时间以 Canvas 返回的记录为准。",
         "file_changed": "课程文件的名称、位置或元数据发生了变化。",
         "submission_comment_added": "老师或其他可见作者添加了新的提交反馈。",
         "submission_comment_changed": "提交反馈已更新。",
@@ -151,12 +191,46 @@ def present(payload, *, now=None):
         if not p.get("due_at"):
             p["facts"].append(("正式截止", "老师未设置"))
         p["facts"].append(("提交状态", submission_status(p)))
+    if p.get("resource_kind") == "file" or p.get("kind") in ("file_created", "file_changed"):
+        for key, label in (
+            ("source_created_at", "上传/创建时间"),
+            ("source_modified_at", "文件修改时间"),
+            ("source_updated_at", "文件信息更新"),
+        ):
+            p["facts"].append((label, timestamp(p[key]) if p.get(key) else "Canvas 未提供有效时间"))
+    elif p.get("source_published_at") and p.get("resource_kind") in ("announcement", "discussion"):
+        p["facts"].append(("Canvas 发布时间", timestamp(p["source_published_at"])))
+    elif p.get("source_published_at") and kind in ("grade_published", "grade_changed"):
+        p["facts"].append(("成绩记录发布时间", timestamp(p["source_published_at"])))
+    for key, label in (("feedback_created_at", "反馈创建时间"), ("feedback_edited_at", "反馈编辑时间")):
+        if p.get(key):
+            p["facts"].append((label, timestamp(p[key])))
     if p.get("points_possible") is not None:
         p["facts"].append(("满分", str(p["points_possible"])))
     if p.get("file_size") is not None:
         p["facts"].append(("文件大小", file_size(p["file_size"])))
     if p.get("author"):
         p["facts"].append(("作者", p["author"]))
+    p["author_email"] = visible_email(p.get("author_email"))
+    p["author_profile_url"] = visible_url(p.get("author_profile_url"), origin)
+    p["author_avatar_url"] = visible_url(p.get("author_avatar_url"), origin)
+    p["media_text"] = {
+        "audio": "此反馈包含音频，请在 Canvas 中收听。",
+        "video": "此反馈包含视频，请在 Canvas 中观看。",
+        "media": "此反馈包含媒体内容，请在 Canvas 中查看。",
+    }.get(p.get("media_kind"), "")
+    p["media_name"] = p.get("media_name") or ""
+    p["action_text"] = (
+        "查看提交与反馈"
+        if p.get("resource_kind") == "submission" or kind.startswith("submission_comment")
+        else "查看文件"
+        if kind.startswith("file_")
+        else "查看公告"
+        if kind.startswith("announcement_")
+        else "查看作业"
+        if p.get("is_assignment")
+        else "在 Canvas 中查看"
+    )
     p["attachments"] = [
         {**item, "size_display": file_size(item.get("size"))} for item in p.get("attachments", [])
     ]
