@@ -19,14 +19,7 @@ class Rules(BaseModel):
     personal: list[str] = Field(default_factory=lambda: ["PT24H", "PT1H"])
     only_incomplete: bool = True
     score_in_email: bool = False
-    events: dict[str, Literal["immediate", "digest", "off"]] = Field(
-        default_factory=lambda: {
-            "file_created": "digest",
-            "file_changed": "digest",
-            "reply_created": "digest",
-            "reply_changed": "digest",
-        }
-    )
+    events: dict[str, Literal["immediate", "digest", "off"]] = Field(default_factory=dict)
     default_event: Literal["immediate", "digest", "off"] = "immediate"
     digest_hour: int = Field(default=18, ge=0, le=23)
     quiet_enabled: bool = False

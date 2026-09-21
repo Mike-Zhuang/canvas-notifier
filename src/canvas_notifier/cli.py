@@ -184,6 +184,18 @@ def sync(once: bool = True, dry_run: bool = False):
         raise typer.Exit(1)
 
 
+@app.command("notifications-immediate")
+def notifications_immediate():
+    """所有范围启用即时通知，关闭摘要/静默延迟，并释放未发送的摘要。"""
+    from canvas_notifier.scheduling.policies import enable_immediate_notifications
+
+    async def main(settings, sessions):
+        async with sessions() as session, session.begin():
+            return await enable_immediate_notifications(session)
+
+    output(run_with_db(main))
+
+
 @reminder_app.command("preview")
 def reminder_preview():
     async def main(settings, sessions):

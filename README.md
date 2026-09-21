@@ -68,6 +68,10 @@ uv run canvas-notifier auth token-test --mode cookie
 
 ## 邮件与规则
 
+**默认所有内容变化都在发现后立即入队发送，包括文件、讨论回复、公告、作业与成绩。** 不再对任何内容类别默认安排每日摘要；首次同步仍建立历史基线，重复采集不会重发已通知的事件。摘要与静默仅作为用户主动选择的可选配置保留。
+
+已有实例可执行 `uv run canvas-notifier notifications-immediate`：统一全局、课程、任务范围的通知方式，关闭静默延迟并释放尚未发送的内容摘要；已接受邮件不重发，SMTP 失败重试仍保留必要退避。
+
 在 `.env` 中填写自己的 SMTP 主机、TLS 模式、发件地址、收件地址。SMTP 密码保存在 `secrets/smtp-password`，权限 600。`MAIL_TEST_TO` 是独立测试收件人配置。
 
 ```sh
