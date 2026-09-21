@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     canvas_cookie_fallback: bool = False
     canvas_cookie_resources: str = ""
     iam_auto_login: bool = False
+    iam_use_saved_session: bool = False
     iam_cookie_file: Path = Path("secrets/iam-cookies.json")
     iam_username_file: Path = Path("secrets/iam-username")
     iam_password_file: Path = Path("secrets/iam-password")

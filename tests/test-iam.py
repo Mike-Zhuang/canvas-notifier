@@ -132,7 +132,9 @@ async def test_password_exchange_and_safe_trace(settings):
     )
 
 
-async def test_saved_iam_sso_requires_no_password_submission(settings):
+@pytest.mark.parametrize("reuse_saved", [False, True])
+async def test_saved_iam_sso_is_only_reused_when_explicitly_enabled(settings, reuse_saved):
+    settings.iam_use_saved_session = reuse_saved
     write_secret(
         settings.iam_cookie_file,
         json.dumps(
@@ -151,7 +153,7 @@ async def test_saved_iam_sso_requires_no_password_submission(settings):
     result = await IAMLogin(settings, httpx.MockTransport(school)).login(
         "synthetic-user", "synthetic-password"
     )
-    assert result.user_id == "42" and school.password_posts == 0
+    assert result.user_id == "42" and school.password_posts == (0 if reuse_saved else 1)
 
 
 @pytest.mark.parametrize(
@@ -425,3 +427,24 @@ async def test_password_only_recovery_can_fetch_resources_without_bearer_file(
     assert courses.complete and len(courses.items) == 1
     assert assignments.complete and len(assignments.items) == 1
     assert calls == ["iam-login"]
+
+
+async def test_new_auth_failure_after_success_is_not_throttled(recovery_settings, sessions):
+    SuccessfulLogin.count = 0
+    for _ in range(2):
+        write_secret(recovery_settings.canvas_cookie_file, "[]")
+        async with CanvasClient(recovery_settings, httpx.MockTransport(canvas_response)) as client:
+            assert await recover_session(sessions, client, login_factory=SuccessfulLogin) == "42"
+        async with sessions() as db:
+            state = await db.get(Health, "iam")
+            assert state.status == "ok" and state.details["next_attempt"] is None
+    assert SuccessfulLogin.count == 2
+
+
+async def test_fresh_password_login_ignores_invalid_saved_iam_file(settings):
+    write_secret(settings.iam_cookie_file, "invalid-old-cookie-file")
+    school = School()
+    result = await IAMLogin(settings, httpx.MockTransport(school)).login(
+        "synthetic-user", "synthetic-password"
+    )
+    assert result.user_id == "42" and school.password_posts == 1

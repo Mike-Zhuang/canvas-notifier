@@ -227,7 +227,7 @@ class IAMLogin:
         )
 
     async def exchange(self, username, password):
-        # 独立 cookie jar：Canvas 和 IAM 各自按域发送 Cookie；旧会话不参与本次登录。
+        # 默认用全新 IAM 会话走密码流程，避免旧 SSO 状态影响恢复；复用需显式开启。
         async with httpx.AsyncClient(
             timeout=20,
             follow_redirects=False,
@@ -236,7 +236,11 @@ class IAMLogin:
             headers={"User-Agent": "Mozilla/5.0 CanvasNotifier/0.1", "Accept-Language": "zh-CN,zh;q=0.9"},
         ) as client:
             try:
-                saved = json.loads(read_secret(self.settings.iam_cookie_file) or "[]")
+                saved = (
+                    json.loads(read_secret(self.settings.iam_cookie_file) or "[]")
+                    if self.settings.iam_use_saved_session
+                    else []
+                )
             except (ValueError, TypeError):
                 raise CanvasError("iam_cookie_file_invalid") from None
             for cookie in saved:

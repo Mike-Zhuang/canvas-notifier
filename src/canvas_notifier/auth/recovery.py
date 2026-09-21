@@ -116,6 +116,8 @@ async def recover_session(sessions, client, *, force=False, login_factory=IAMLog
                     "credential_revision": credential_revision(settings),
                     "failures": 0,
                     "error": None,
+                    # 成功后不保留失败冷却；新会话再次被拒绝时应立即恢复。
+                    "next_attempt": None,
                     "last_success": finished.isoformat(),
                     "hop_count": len(result.trace),
                     "password_submitted": any(
