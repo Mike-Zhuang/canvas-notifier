@@ -168,3 +168,31 @@ async def test_429_retry_after(settings, monkeypatch):
     async with CanvasClient(settings, httpx.MockTransport(handler)) as client:
         result = await client.paginate("/api/v1/courses")
     assert result.complete and calls == 3 and 4 in delays
+
+
+async def test_missing_token_fallback_still_requires_verified_allowed_cookie(settings):
+    import json
+
+    settings.canvas_token_file.unlink()
+    settings.canvas_cookie_fallback = True
+    settings.canvas_cookie_resources = "course"
+    write_secret(
+        settings.canvas_cookie_file,
+        json.dumps(
+            [{"name": "session", "value": "synthetic", "domain": "canvas.tongji.edu.cn", "path": "/"}]
+        ),
+    )
+    requests = []
+
+    def handler(request):
+        requests.append(request.url.path)
+        return httpx.Response(200, json=[])
+
+    async with CanvasClient(settings, httpx.MockTransport(handler)) as client:
+        not_verified = await client.paginate("/api/v1/courses", kind="course")
+        assert not_verified.error == "bearer_missing" and requests == []
+        client.cookie_verified = True
+        allowed = await client.paginate("/api/v1/courses", kind="course")
+        denied = await client.paginate("/api/v1/courses/1/files", kind="file")
+        assert allowed.complete and denied.error == "bearer_missing"
+    assert requests == ["/api/v1/courses"]

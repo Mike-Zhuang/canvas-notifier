@@ -361,3 +361,40 @@ def test_comment_parser_preserves_slashes_inside_public_key():
     script = Path("tests/fixtures/iam-public-key.js").read_text()
     encrypted = encrypt_password(script, "synthetic-password")
     assert len(base64.b64decode(encrypted)) == 128
+
+
+async def test_password_only_recovery_can_fetch_resources_without_bearer_file(
+    recovery_settings, sessions, monkeypatch
+):
+    import canvas_notifier.auth.iam as module
+
+    recovery_settings.canvas_token_file.unlink()
+    calls = []
+
+    async def login(self, username, password):
+        calls.append("iam-login")
+        return LoginResult(
+            "42",
+            [{"name": "session", "value": "new-session", "domain": "canvas.tongji.edu.cn", "path": "/"}],
+            [],
+        )
+
+    monkeypatch.setattr(module.IAMLogin, "login", login)
+
+    def handler(request):
+        assert "authorization" not in request.headers
+        if "session=new-session" not in request.headers.get("cookie", ""):
+            return httpx.Response(401, json={})
+        if request.url.path == "/api/v1/users/self":
+            return httpx.Response(200, json={"id": "42"})
+        if request.url.path == "/api/v1/courses":
+            return httpx.Response(200, json=[{"id": "1", "name": "Synthetic course"}])
+        return httpx.Response(200, json=[{"id": "2", "name": "Synthetic assignment"}])
+
+    async with CanvasClient(recovery_settings, httpx.MockTransport(handler)) as client:
+        await bind_identity(sessions, client)
+        courses = await client.paginate("/api/v1/courses", kind="course")
+        assignments = await client.paginate("/api/v1/courses/1/assignments", kind="assignment")
+    assert courses.complete and len(courses.items) == 1
+    assert assignments.complete and len(assignments.items) == 1
+    assert calls == ["iam-login"]

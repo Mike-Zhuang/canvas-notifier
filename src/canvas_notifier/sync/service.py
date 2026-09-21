@@ -225,7 +225,12 @@ async def sync_once(settings, sessions, *, force=True, transport=None):
                     "degraded"
                     if client.cookie_verified
                     and client.health.get("token")
-                    in ("auth_rejected", "bearer_expired_or_rejected", "login_html_returned")
+                    in (
+                        "auth_rejected",
+                        "bearer_expired_or_rejected",
+                        "login_html_returned",
+                        "bearer_missing",
+                    )
                     else "ok"
                     if client.user_id
                     else "reauth_required"

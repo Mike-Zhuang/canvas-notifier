@@ -241,7 +241,7 @@ class CanvasClient:
             and self.cookie_verified
             and kind in allowed
             and self.health.get("token")
-            in ("auth_rejected", "bearer_expired_or_rejected", "login_html_returned")
+            in ("auth_rejected", "bearer_expired_or_rejected", "login_html_returned", "bearer_missing")
         ):
             return await self._get(url, "cookie")
         try:
@@ -251,7 +251,7 @@ class CanvasClient:
             if (
                 mode is None
                 and selected == "token"
-                and error.code in ("auth_rejected", "login_html_returned")
+                and error.code in ("auth_rejected", "login_html_returned", "bearer_missing")
                 and self.settings.canvas_cookie_fallback
                 and self.cookie_verified
                 and kind in allowed
