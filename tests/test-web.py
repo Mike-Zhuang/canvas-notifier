@@ -101,3 +101,22 @@ async def test_login_rate_limit(settings, sessions):
         for i in range(8):
             assert (await client.post("/login", data={"csrf": csrf, "password": "wrong"})).status_code == 401
         assert (await client.post("/login", data={"csrf": csrf, "password": "wrong"})).status_code == 429
+
+
+async def test_custom_ten_character_admin_password(settings, sessions):
+    from canvas_notifier.config import write_secret
+
+    write_secret(settings.admin_password_file, "DemoPass7!")
+    app = create_app(settings, sessions)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
+    ) as client:
+        page = await client.get("/login")
+        csrf = re.search(r'name="csrf" value="([^"]+)"', page.text)[1]
+        response = await client.post(
+            "/login",
+            data={"csrf": csrf, "password": "DemoPass7!"},
+            headers={"Origin": "http://127.0.0.1:8000"},
+        )
+        assert response.status_code == 303
+        assert (await client.get("/")).status_code == 200

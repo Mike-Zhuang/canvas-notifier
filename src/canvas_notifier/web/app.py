@@ -35,7 +35,7 @@ def create_app(settings=None, sessions=None):
         engine, sessions = database(settings.database_url)
     session_key = read_secret(settings.session_secret_file)
     password = read_secret(settings.admin_password_file)
-    if len(session_key) < 32 or len(password) < 12:
+    if len(session_key) < 32 or len(password) < 8:
         raise ValueError("Run canvas-notifier init before starting web")
 
     @asynccontextmanager
