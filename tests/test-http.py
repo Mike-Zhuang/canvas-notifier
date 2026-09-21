@@ -196,3 +196,52 @@ async def test_missing_token_fallback_still_requires_verified_allowed_cookie(set
         denied = await client.paginate("/api/v1/courses/1/files", kind="file")
         assert allowed.complete and denied.error == "bearer_missing"
     assert requests == ["/api/v1/courses"]
+
+
+@pytest.mark.parametrize(
+    "probe_status,expected",
+    [
+        (401, "auth_rejected"),
+        (200, "resource_unavailable"),
+        (403, "resource_unavailable"),
+        (404, "resource_unavailable"),
+    ],
+)
+async def test_cookie_identity_404_requires_independent_auth_rejection(settings, probe_status, expected):
+    write_secret(
+        settings.canvas_cookie_file,
+        '[{"name":"session","value":"expired-session","domain":"canvas.tongji.edu.cn","path":"/"}]',
+    )
+    paths = []
+
+    def handler(request):
+        paths.append(request.url.path)
+        assert "authorization" not in request.headers
+        if request.url.path == "/api/v1/users/self":
+            return httpx.Response(
+                404, json={"errors": [{"message": "The specified resource does not exist."}]}
+            )
+        assert request.url.params["per_page"] == "1"
+        return httpx.Response(probe_status, json=[])
+
+    async with CanvasClient(settings, httpx.MockTransport(handler)) as client:
+        with pytest.raises(CanvasError, match=expected):
+            await client.identity("cookie")
+    assert paths == ["/api/v1/users/self", "/api/v1/courses"]
+
+
+async def test_regular_page_404_does_not_probe_auth(settings):
+    write_secret(
+        settings.canvas_cookie_file,
+        '[{"name":"session","value":"valid-session","domain":"canvas.tongji.edu.cn","path":"/"}]',
+    )
+    paths = []
+
+    def handler(request):
+        paths.append(request.url.path)
+        return httpx.Response(404, json={})
+
+    async with CanvasClient(settings, httpx.MockTransport(handler)) as client:
+        with pytest.raises(CanvasError, match="resource_unavailable"):
+            await client.get("/api/v1/courses/1/pages", mode="cookie")
+    assert paths == ["/api/v1/courses/1/pages"]

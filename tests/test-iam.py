@@ -262,7 +262,10 @@ async def test_persistent_block_or_cooldown(recovery_settings, sessions, code):
     assert read_secret(recovery_settings.canvas_cookie_file) == "[]"
 
 
-async def test_bind_recovers_only_when_both_auth_channels_failed(recovery_settings, sessions, monkeypatch):
+@pytest.mark.parametrize("masked_cookie_failure", [False, True])
+async def test_bind_recovers_only_when_both_auth_channels_failed(
+    recovery_settings, sessions, monkeypatch, masked_cookie_failure
+):
     import canvas_notifier.auth.iam as module
 
     calls = []
@@ -276,7 +279,31 @@ async def test_bind_recovers_only_when_both_auth_channels_failed(recovery_settin
         )
 
     monkeypatch.setattr(module.IAMLogin, "login", login)
-    async with CanvasClient(recovery_settings, httpx.MockTransport(canvas_response)) as client:
+    if masked_cookie_failure:
+        write_secret(
+            recovery_settings.canvas_cookie_file,
+            json.dumps(
+                [
+                    {
+                        "name": "session",
+                        "value": "expired-session",
+                        "domain": "canvas.tongji.edu.cn",
+                        "path": "/",
+                    }
+                ]
+            ),
+        )
+
+    def handler(request):
+        if (
+            masked_cookie_failure
+            and request.url.path == "/api/v1/users/self"
+            and "session=expired-session" in request.headers.get("cookie", "")
+        ):
+            return httpx.Response(404, json={})
+        return canvas_response(request)
+
+    async with CanvasClient(recovery_settings, httpx.MockTransport(handler)) as client:
         await bind_identity(sessions, client)
         assert client.user_id == "42"
     assert len(calls) == 1

@@ -260,7 +260,20 @@ class CanvasClient:
             raise
 
     async def identity(self, mode=None):
-        data, _ = await self.get("/api/v1/users/self", mode=mode, kind="identity")
+        try:
+            data, _ = await self.get("/api/v1/users/self", mode=mode, kind="identity")
+        except CanvasError as error:
+            # 同济的失效 Cookie 在 self 接口可能返回 404；只有课程接口也明确
+            # 拒绝认证才触发重登，避免把真实资源缺失或网络故障当成密码失效。
+            selected = mode or self.settings.canvas_auth_mode
+            if selected == "cookie" and error.code == "resource_unavailable" and error.status == 404:
+                try:
+                    await self.get("/api/v1/courses", [("per_page", "1")], mode="cookie")
+                except CanvasError as probe_error:
+                    if probe_error.code in ("auth_rejected", "login_html_returned"):
+                        raise probe_error from None
+                self.health["cookie"] = error.code
+            raise
         if not isinstance(data, dict) or not data.get("id"):
             raise CanvasError("invalid_identity")
         return str(data["id"])
