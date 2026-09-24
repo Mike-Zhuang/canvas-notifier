@@ -226,3 +226,33 @@ async def test_skipped_failed_scope_keeps_global_partial(settings, sessions):
 
     result = await sync_once(settings, sessions, force=False, transport=httpx.MockTransport(handler))
     assert result["status"] == "partial" and result["unhealthy_scopes"] == 1
+
+
+async def test_successful_iam_recovery_does_not_send_indirect_success_mail(settings, sessions, monkeypatch):
+    import canvas_notifier.sync.service as service
+    from canvas_notifier.db import Health
+
+    async with sessions() as db, db.begin():
+        db.add(Health(name="sync", status="iam_network_error", details={}))
+        db.add(Health(name="auth", status="reauth_required", details={}))
+        db.add(Health(name="initial_digest", status="created", details={}))
+
+    settings.canvas_auth_mode = "cookie"
+
+    async def recovered(sessions, client):
+        client.cookies = [
+            {"name": "session", "value": "synthetic", "domain": "canvas.tongji.edu.cn", "path": "/"}
+        ]
+        client.user_id = "1"
+        client.cookie_verified = True
+        client.health.update({"iam": "recovered", "token": "auth_rejected", "cookie": "cookie_ok"})
+
+    monkeypatch.setattr(service, "bind_identity", recovered)
+    result = await sync_once(
+        settings, sessions, transport=httpx.MockTransport(lambda r: httpx.Response(200, json=[]))
+    )
+    assert result["status"] == "ok"
+    async with sessions() as db:
+        assert not (await db.scalars(select(Delivery))).all()
+        assert (await db.get(Health, "auth")).status == "degraded"
+        assert (await db.get(Health, "sync")).status == "ok"

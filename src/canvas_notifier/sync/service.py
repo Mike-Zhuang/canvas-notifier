@@ -212,14 +212,21 @@ async def sync_once(settings, sessions, *, force=True, transport=None):
                     ).all()
                     for pending in stale:
                         pending.status, pending.reason = "cancelled", "同步状态已经变化"
-                    await enqueue(
-                        session,
-                        settings,
-                        f"sync-state:{now_utc().isoformat()}",
-                        None,
-                        "sync_recovered" if status == "ok" else "sync_interrupted",
-                        {"status": status},
+                    # 续登成功不通过同步状态变化间接发送成功邮件；真实采集失败仍告警。
+                    silent_auth_recovery = (
+                        client.health.get("iam") == "recovered"
+                        and status in ("ok", "partial")
+                        and summary["failed_scopes"] == 0
                     )
+                    if not silent_auth_recovery:
+                        await enqueue(
+                            session,
+                            settings,
+                            f"sync-state:{now_utc().isoformat()}",
+                            None,
+                            "sync_recovered" if status == "ok" else "sync_interrupted",
+                            {"status": status},
+                        )
                 await health(session, "sync", status, summary)
                 auth_status = (
                     "degraded"
@@ -236,7 +243,11 @@ async def sync_once(settings, sessions, *, force=True, transport=None):
                     else "reauth_required"
                 )
                 previous_auth = await session.get(Health, "auth")
-                if auth_status == "degraded" and (not previous_auth or previous_auth.status != "degraded"):
+                if (
+                    auth_status == "degraded"
+                    and client.health.get("iam") != "recovered"
+                    and (not previous_auth or previous_auth.status != "degraded")
+                ):
                     await enqueue(
                         session,
                         settings,

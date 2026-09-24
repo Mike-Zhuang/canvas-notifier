@@ -128,14 +128,7 @@ async def recover_session(sessions, client, *, force=False, login_factory=IAMLog
             async with sessions() as session, session.begin():
                 state = await session.get(Health, "iam")
                 state.status, state.details, state.updated_at = "ok", details, finished
-                await enqueue(
-                    session,
-                    settings,
-                    "iam-recovered:" + finished.isoformat(),
-                    None,
-                    "iam_recovered",
-                    {"status": "IAM 已验证本人身份并恢复 Canvas 会话"},
-                )
+                # 自动续登成功只更新健康状态；需要本人处理的失败才发邮件。
             return verified
         except Exception as error:
             code = error.code if isinstance(error, CanvasError) else "iam_internal_error"

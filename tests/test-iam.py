@@ -7,12 +7,13 @@ import httpx
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from sqlalchemy import select
 
 from canvas_notifier.auth.iam import CALLBACK, CANVAS, IAM, IAMLogin, LoginResult
 from canvas_notifier.auth.recovery import recover_session
 from canvas_notifier.canvas.http import CanvasClient, CanvasError
 from canvas_notifier.config import read_secret, write_secret
-from canvas_notifier.db import Account, Health
+from canvas_notifier.db import Account, Delivery, Health
 from canvas_notifier.sync.service import bind_identity
 
 
@@ -232,6 +233,7 @@ async def test_recovery_verified_before_save_and_reused(recovery_settings, sessi
     assert recovery_settings.canvas_cookie_file.stat().st_mode & 0o077 == 0
     async with sessions() as db:
         assert (await db.get(Health, "iam")).status == "ok"
+        assert not (await db.scalars(select(Delivery))).all()
 
 
 async def test_mismatch_does_not_overwrite_cookie_file(recovery_settings, sessions):
@@ -261,6 +263,9 @@ async def test_persistent_block_or_cooldown(recovery_settings, sessions, code):
             with pytest.raises(CanvasError):
                 await recover_session(sessions, client, login_factory=FailedLogin)
     assert FailedLogin.count == 1
+    async with sessions() as db:
+        notices = (await db.scalars(select(Delivery))).all()
+        assert len(notices) == 1 and notices[0].payload["kind"] == "iam_login_failed"
     assert read_secret(recovery_settings.canvas_cookie_file) == "[]"
 
 
