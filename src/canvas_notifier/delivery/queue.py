@@ -89,6 +89,7 @@ async def enqueue(
     force_recipient=None,
     now=None,
     mode_override=None,
+    sync_run_id=None,
 ):
     now = now or now_utc()
     rule_key = resource.key if resource else ""
@@ -118,6 +119,7 @@ async def enqueue(
         or data.get("title")
         or data.get("subject")
         or data.get("display_name")
+        or data.get("full_name")
         or "Canvas 更新"
     )
     assignment = resource if resource and resource.kind == "assignment" else None
@@ -161,6 +163,10 @@ async def enqueue(
         rule_text = "每日摘要" if mode == "digest" else "即时事件通知"
     payload = {
         "kind": kind,
+        "sync_run_id": sync_run_id if resource and resource.kind in ("file", "folder") else None,
+        "file_batch": f"{sync_run_id}:{resource.course_id}"
+        if sync_run_id and resource and resource.kind in ("file", "folder")
+        else None,
         "canvas_origin": settings.canvas_base_url,
         "label": LABELS.get(kind, kind.replace("_", " ")),
         "title": re.sub(r"[\r\n]+", " ", title)[:200],
@@ -178,6 +184,9 @@ async def enqueue(
         "redo_request": submission_data.get("redo_request", False),
         "points_possible": task_data.get("points_possible"),
         "file_size": data.get("size") if resource and resource.kind == "file" else None,
+        "filename": data.get("filename") if resource and resource.kind == "file" else None,
+        "content_type": data.get("content-type") if resource and resource.kind == "file" else None,
+        "folder_id": data.get("folder_id") if resource and resource.kind == "file" else None,
         "author": comment_data.get("author_name") or feedback.get("author_name"),
         "resource_kind": resource.kind if resource else "",
         "source_created_at": email_data.get("source_created_at"),

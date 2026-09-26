@@ -23,11 +23,17 @@ async def worker(settings, sessions):
     async def poll_loop():
         while True:
             try:
-                await sync_once(settings, sessions, force=False)
+                result = await sync_once(settings, sessions, force=False)
+                retry_seconds = result.get("retry_seconds", settings.poll_seconds)
             except Exception as error:
+                from canvas_notifier.sync.alerts import observe_sync
+
                 async with sessions() as session, session.begin():
+                    retry_seconds = await observe_sync(
+                        session, settings, [{"scope": "worker", "status": "error:" + type(error).__name__}]
+                    )
                     await health(session, "sync", "error:" + type(error).__name__)
-            await asyncio.sleep(settings.poll_seconds)
+            await asyncio.sleep(retry_seconds)
 
     async def delivery_loop():
         while True:

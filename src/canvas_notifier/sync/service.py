@@ -4,11 +4,12 @@ from sqlalchemy import select
 
 from canvas_notifier.canvas import adapters
 from canvas_notifier.canvas.http import CanvasClient, CanvasError
-from canvas_notifier.db import Account, Delivery, Health, Resource, Scope, SyncRun
+from canvas_notifier.db import Account, Health, Resource, Scope, SyncRun
 from canvas_notifier.delivery.queue import enqueue
 from canvas_notifier.domain.time import now_utc, parse_time
 from canvas_notifier.scheduling.planner import rebuild
 from canvas_notifier.scheduling.rules import effective_rules
+from canvas_notifier.sync.alerts import observe_sync
 from canvas_notifier.sync.leases import lease
 from canvas_notifier.sync.state import apply_scope, health
 
@@ -92,6 +93,7 @@ async def sync_once(settings, sessions, *, force=True, transport=None):
                             result,
                             scope_suffix=suffix,
                             user_id=client.user_id,
+                            sync_run_id=run_id,
                         )
                         if transport is None and scope.complete:
                             scope.verification = (
@@ -113,6 +115,13 @@ async def sync_once(settings, sessions, *, force=True, transport=None):
                         rule, _ = await effective_rules(session, cid)
                         assignments_scope = await session.get(Scope, f"assignment:{cid}:")
                         file_scope = await session.get(Scope, f"file:{cid}:")
+                        retry_course = bool(
+                            await session.scalar(
+                                select(Scope.key)
+                                .where(Scope.course_id == cid, Scope.status != "ok", Scope.baseline.is_(True))
+                                .limit(1)
+                            )
+                        )
                     ended = course.data.get("workflow_state") == "completed"
                     term = course.data.get("term") or {}
                     end = parse_time(course.data.get("end_at") or term.get("end_at"))
@@ -128,6 +137,7 @@ async def sync_once(settings, sessions, *, force=True, transport=None):
                     interval = settings.historical_poll_seconds if ended else settings.poll_seconds
                     due = (
                         force
+                        or retry_course
                         or not assignments_scope
                         or not assignments_scope.last_success
                         or now_utc() - assignments_scope.last_success >= timedelta(seconds=interval)
@@ -139,6 +149,7 @@ async def sync_once(settings, sessions, *, force=True, transport=None):
                         await apply("submission", cid, submission_result)
                     content_due = (
                         force
+                        or retry_course
                         or not file_scope
                         or not file_scope.last_success
                         or now_utc() - file_scope.last_success
@@ -200,33 +211,13 @@ async def sync_once(settings, sessions, *, force=True, transport=None):
                 # 只记录错误类别，不记录可能含有带凭据 URL 的异常文本。
                 status = "internal_error:" + type(error).__name__
             async with sessions() as session, session.begin():
-                previous = await session.get(Health, "sync")
-                if (previous is None and status != "ok") or (previous and previous.status != status):
-                    stale = (
-                        await session.scalars(
-                            select(Delivery).where(
-                                Delivery.status.in_(["pending", "retry"]),
-                                Delivery.unique_key.startswith("sync-state:"),
-                            )
-                        )
-                    ).all()
-                    for pending in stale:
-                        pending.status, pending.reason = "cancelled", "同步状态已经变化"
-                    # 续登成功不通过同步状态变化间接发送成功邮件；真实采集失败仍告警。
-                    silent_auth_recovery = (
-                        client.health.get("iam") == "recovered"
-                        and status in ("ok", "partial")
-                        and summary["failed_scopes"] == 0
-                    )
-                    if not silent_auth_recovery:
-                        await enqueue(
-                            session,
-                            settings,
-                            f"sync-state:{now_utc().isoformat()}",
-                            None,
-                            "sync_recovered" if status == "ok" else "sync_interrupted",
-                            {"status": status},
-                        )
+                unhealthy = (
+                    await session.scalars(select(Scope).where(Scope.status != "ok", Scope.baseline.is_(True)))
+                ).all()
+                failures = [{"scope": s.key, "status": s.status} for s in unhealthy]
+                if status not in ("ok", "partial"):
+                    failures = [{"scope": "authentication_or_sync", "status": status}]
+                summary["retry_seconds"] = await observe_sync(session, settings, failures)
                 await health(session, "sync", status, summary)
                 auth_status = (
                     "degraded"

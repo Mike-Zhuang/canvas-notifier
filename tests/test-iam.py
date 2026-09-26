@@ -265,7 +265,7 @@ async def test_persistent_block_or_cooldown(recovery_settings, sessions, code):
     assert FailedLogin.count == 1
     async with sessions() as db:
         notices = (await db.scalars(select(Delivery))).all()
-        assert len(notices) == 1 and notices[0].payload["kind"] == "iam_login_failed"
+        assert not notices  # 失败由同步持续故障窗口统一告警，避免双重发信。
     assert read_secret(recovery_settings.canvas_cookie_file) == "[]"
 
 

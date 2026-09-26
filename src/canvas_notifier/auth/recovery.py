@@ -7,7 +7,6 @@ from canvas_notifier.auth.iam import IAMLogin
 from canvas_notifier.canvas.http import CanvasError
 from canvas_notifier.config import read_secret, write_secret
 from canvas_notifier.db import Account, Health
-from canvas_notifier.delivery.queue import enqueue
 from canvas_notifier.domain.time import now_utc, parse_time
 from canvas_notifier.sync.leases import lease
 
@@ -72,7 +71,6 @@ async def recover_session(sessions, client, *, force=False, login_factory=IAMLog
             if account and account.origin != client.origin:
                 raise CanvasError("account_changed_requires_new_database")
             state = await session.get(Health, "iam")
-            previous_status = state.status if state else None
             previous = dict(state.details) if state else {}
             unchanged = previous.get("credential_revision") == revision
             if not force and unchanged:
@@ -155,13 +153,4 @@ async def recover_session(sessions, client, *, force=False, login_factory=IAMLog
             async with sessions() as session, session.begin():
                 state = await session.get(Health, "iam")
                 state.status, state.details, state.updated_at = status, details, now_utc()
-                if previous_status != status:
-                    await enqueue(
-                        session,
-                        settings,
-                        "iam-failed:" + now.isoformat(),
-                        None,
-                        "iam_login_failed",
-                        {"status": code},
-                    )
             raise CanvasError(code) from None

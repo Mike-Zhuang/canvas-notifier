@@ -58,7 +58,7 @@ a { color:#075985; }
 {% if item.excerpt %}<div class="mail-content" dir="auto">{{ item.excerpt|safe }}</div>{% endif %}
 {% if item.media_text %}<p>{{ item.media_text }} {{ item.media_name }}</p>{% endif %}
 {% for a in item.attachments %}<p>附件：{% if a.link %}<a href="{{ a.link }}">{{ a.name }}</a>{% else %}{{ a.name }}{% endif %}（{{ a.size_display }}）</p>{% endfor %}
-<p style="font-size:12px;color:#666666">发现时间：{{ item.observed_display }}（{{ item.timezone }}）</p>
+<p style="font-size:12px;color:#666666">发现时间：{{ item.observed_display }}（{{ item.timezone }}）<br>最近成功同步：{{ item.last_synced_display }}<br>本次规则：{{ item.rule_text }}</p>
 {% if item.link %}<p><a href="{{ item.link }}" style="color:#075985;text-decoration:underline">{{ item.action_text }}</a></p>{% endif %}
 </div>
 {% endfor %}

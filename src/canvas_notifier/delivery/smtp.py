@@ -9,7 +9,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlalchemy import select, update
 
 from canvas_notifier.config import read_secret
-from canvas_notifier.db import Delivery, Reminder, Resource
+from canvas_notifier.db import Delivery, Lease, Reminder, Resource, SyncRun
 from canvas_notifier.domain.normalize import complete
 from canvas_notifier.domain.time import now_utc, parse_time
 from canvas_notifier.scheduling.planner import context
@@ -127,13 +127,26 @@ async def _deliver_claimed_batch(settings, sessions, *, sender=send, limit=30, n
         candidates = list(
             (
                 await session.scalars(
-                    select(Delivery.id)
+                    select(Delivery)
                     .where(Delivery.status.in_(["pending", "retry"]), Delivery.available_at <= now)
                     .order_by(Delivery.id)
-                    .limit(limit)
                 )
             ).all()
         )
+        ready = []
+        sync_lease = await session.get(Lease, "sync")
+        for row in candidates:
+            run_id = row.payload.get("sync_run_id")
+            if run_id:
+                run = await session.get(SyncRun, run_id)
+                if run and not run.finished_at and sync_lease and sync_lease.expires_at > now:
+                    continue
+            ready.append(row)
+        seeds = ready[:limit]
+        batches = {(r.payload.get("file_batch"), r.recipient) for r in seeds if r.payload.get("file_batch")}
+        candidates = [
+            r.id for r in ready if r in seeds or (r.payload.get("file_batch"), r.recipient) in batches
+        ]
     claimed = []
     for delivery_id in candidates:
         async with sessions() as session, session.begin():
@@ -154,22 +167,36 @@ async def _deliver_claimed_batch(settings, sessions, *, sender=send, limit=30, n
                 row.status, row.reason = ("retry" if reason == "等待新鲜数据" else "cancelled"), reason
                 row.available_at = now + timedelta(minutes=5)
                 continue
-            group_key = ("digest", row.recipient) if row.payload.get("digest") else ("single", row.id)
+            group_key = (
+                ("files", row.recipient, row.payload["file_batch"])
+                if row.payload.get("file_batch") and not row.payload.get("digest")
+                else ("digest", row.recipient)
+                if row.payload.get("digest")
+                else ("single", row.id)
+            )
             groups.setdefault(group_key, []).append(row)
     sent_count = 0
     for rows in groups.values():
         primary = rows[0]
         payload = None
-        if primary.payload.get("digest"):
+        if primary.payload.get("digest") or (primary.payload.get("file_batch") and len(rows) > 1):
             payload = {
                 **primary.payload,
-                "label": "更新摘要",
+                "label": "课程资料更新" if primary.payload.get("file_batch") else "更新摘要",
                 "title": f"{len(rows)} 项更新",
                 "excerpt": "",
+                "kind": "file_batch" if primary.payload.get("file_batch") else "digest",
+                "resource_kind": "",
+                "source_created_at": None,
+                "source_modified_at": None,
+                "source_updated_at": None,
                 "digest_items": [dict(r.payload) for r in rows],
-                "course": "",
+                "course": primary.payload.get("course", "") if primary.payload.get("file_batch") else "",
                 "link": "",
                 "file_size": None,
+                "filename": None,
+                "content_type": None,
+                "folder_id": None,
                 "is_assignment": False,
                 "points_possible": None,
                 "due_at": None,
@@ -195,6 +222,7 @@ async def _deliver_claimed_batch(settings, sessions, *, sender=send, limit=30, n
                 row = await session.get(Delivery, previous.id)
                 if row.lease_owner != owner or row.status != "sending":
                     continue
+                row.message_id = primary.message_id
                 row.attempts += 1
                 row.lease_until, row.lease_owner = None, None
                 if error:

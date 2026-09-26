@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     mail_to: str = ""
     mail_test_to: str = ""
     display_timezone: str = "Asia/Shanghai"
+    sync_alert_failures: int = Field(default=3, ge=2)
+    sync_alert_seconds: int = Field(default=300, ge=60)
+    sync_recovery_successes: int = Field(default=2, ge=1)
     poll_seconds: int = 300
     content_poll_seconds: int = 900
     historical_poll_seconds: int = 3600

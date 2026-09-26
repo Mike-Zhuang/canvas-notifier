@@ -8,11 +8,13 @@ from canvas_notifier.domain.normalize import changes_for, normalize
 from canvas_notifier.domain.time import now_utc
 
 
-async def emit(session, settings, resource, kind, changes, suffix="", now=None):
+async def emit(session, settings, resource, kind, changes, suffix="", now=None, sync_run_id=None):
     unique = f"{resource.key}:{resource.version}:{kind}:{suffix}"
     if await session.scalar(select(Event.id).where(Event.unique_key == unique)):
         return
-    state = await enqueue(session, settings, unique, resource, kind, changes, now=now)
+    state = await enqueue(
+        session, settings, unique, resource, kind, changes, now=now, sync_run_id=sync_run_id
+    )
     session.add(
         Event(
             unique_key=unique,
@@ -26,7 +28,17 @@ async def emit(session, settings, resource, kind, changes, suffix="", now=None):
 
 
 async def apply_scope(
-    session, settings, kind, course_id, result, *, scope_suffix="", user_id="", now=None, targeted=False
+    session,
+    settings,
+    kind,
+    course_id,
+    result,
+    *,
+    scope_suffix="",
+    user_id="",
+    now=None,
+    targeted=False,
+    sync_run_id=None,
 ):
     now = now or now_utc()
     scope_key = f"{kind}:{course_id}:{scope_suffix}"
@@ -34,7 +46,6 @@ async def apply_scope(
     if not scope:
         scope = Scope(key=scope_key, kind=kind, course_id=course_id, baseline=False)
         session.add(scope)
-    previous_status = scope.status
     if not targeted:
         scope.last_attempt, scope.pages, scope.count = now, result.pages, len(result.items)
         scope.complete, scope.cursor, scope.status = result.complete, result.cursor, result.error or "ok"
@@ -81,7 +92,7 @@ async def apply_scope(
                 else:
                     events = [(kind + "_created", {})]
                 for i, (event, changes) in enumerate(events):
-                    await emit(session, settings, resource, event, changes, str(i), now)
+                    await emit(session, settings, resource, event, changes, str(i), now, sync_run_id)
         else:
             # 缺字段不等于 null；轻量响应不能抹掉以前的完整详情。
             merged = {**resource.data, **data}
@@ -93,7 +104,7 @@ async def apply_scope(
                 resource.data = merged
                 if scope.baseline:
                     for i, (event, changes) in enumerate(changes_for(kind, before, merged, user_id)):
-                        await emit(session, settings, resource, event, changes, str(i), now)
+                        await emit(session, settings, resource, event, changes, str(i), now, sync_run_id)
             resource.data = merged
             resource.last_seen, resource.missing_count, resource.availability = now, 0, "visible"
     if targeted:
@@ -109,17 +120,6 @@ async def apply_scope(
     scope.next_attempt = now + timedelta(
         seconds=settings.poll_seconds if scope.status == "ok" else max(settings.poll_seconds, 300)
     )
-    if scope.baseline and previous_status not in (None, "never") and previous_status != scope.status:
-        kind_event = "sync_recovered" if scope.status == "ok" else "sync_interrupted"
-        await enqueue(
-            session,
-            settings,
-            f"health:{scope_key}:{now.isoformat()}",
-            None,
-            kind_event,
-            {"scope": scope_key, "status": scope.status},
-            now=now,
-        )
     return scope
 
 

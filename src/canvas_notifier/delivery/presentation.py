@@ -207,6 +207,13 @@ def present(payload, *, now=None):
             p["facts"].append((label, timestamp(p[key])))
     if p.get("points_possible") is not None:
         p["facts"].append(("满分", str(p["points_possible"])))
+    for key, label in (
+        ("filename", "原始文件名"),
+        ("content_type", "文件类型"),
+        ("folder_id", "所在文件夹 ID"),
+    ):
+        if p.get(key) is not None:
+            p["facts"].append((label, str(p[key])))
     if p.get("file_size") is not None:
         p["facts"].append(("文件大小", file_size(p["file_size"])))
     if p.get("author"):

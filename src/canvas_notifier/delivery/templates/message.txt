@@ -39,6 +39,8 @@ Canvas · {{ label }}
 {% if item.author_avatar_url %}作者头像：{{ item.author_avatar_url }}{% endif %}
 {% if item.media_text %}{{ item.media_text }} {{ item.media_name }}{% endif %}
 系统发现时间：{{ item.observed_display }}（{{ item.timezone }}）
+最近成功同步：{{ item.last_synced_display }}
+本次规则：{{ item.rule_text }}
 {% for a in item.attachments %}附件：{{ a.name }}（{{ a.size_display }}） {{ a.link }}
 {% endfor %}{{ item.link }}
 {% endfor %}
