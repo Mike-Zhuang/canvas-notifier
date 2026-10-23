@@ -44,24 +44,13 @@ a { color:#075985; }
 {% if changes_text %}<h2 style="font-size:16px;Margin:22px 0 8px">变化详情</h2><div dir="auto" style="white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere;font-size:14px;line-height:1.6">{{ changes_text }}</div>{% endif %}
 {% if excerpt or media_text %}<h2 style="font-size:16px;Margin:22px 0 8px">课程内容与反馈</h2>{% endif %}
 {% if excerpt %}<div class="mail-content" dir="auto" style="font-size:14px;line-height:1.6;word-wrap:break-word;overflow-wrap:anywhere">{{ excerpt|safe }}</div>{% endif %}
+{% if image_note %}<p style="font-size:12px;color:#666666">{{ image_note }}</p>{% endif %}
 {% if media_text %}<p style="Margin:12px 0">{{ media_text }}{% if media_name %}<br>媒体名称：{{ media_name }}{% endif %}</p>{% endif %}
 {% if attachments %}
 <table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" style="Margin:20px 0;border:1px solid #eeeeee;background:#f7f7f7"><tr><td style="padding:12px;font-size:14px"><strong>附件</strong><ul style="Margin:8px 0 0;padding-left:20px">{% for attachment in attachments %}<li style="Margin:4px 0;word-wrap:break-word;overflow-wrap:anywhere">{% if attachment.link %}<a href="{{ attachment.link }}" style="color:#075985;text-decoration:underline">{{ attachment.name }}</a>{% else %}{{ attachment.name }}{% endif %}（{{ attachment.size_display }}）</li>{% endfor %}</ul></td></tr></table>
 {% endif %}
-{% for item in digest_items|default([]) %}
-<div style="border-top:1px solid #dddddd;Margin-top:24px;padding-top:16px">
-<p style="Margin:0 0 6px;color:#666666">{{ item.course }} · {{ item.label }}</p><h2 dir="auto" style="font-size:17px;Margin:6px 0;word-wrap:break-word">{{ item.title }}</h2>
-{% for name,value in item.facts %}<p style="Margin:4px 0"><strong>{{ name }}：</strong>{{ value }}</p>{% endfor %}
-{% if item.author_email %}<p>作者邮箱：<a href="mailto:{{ item.author_email }}">{{ item.author_email }}</a></p>{% endif %}
-{% if item.author_profile_url %}<p><a href="{{ item.author_profile_url }}">查看作者资料</a></p>{% endif %}{% if item.author_avatar_url %}<p><a href="{{ item.author_avatar_url }}">查看作者头像</a></p>{% endif %}
-{% if item.changes_text %}<div dir="auto" style="white-space:pre-wrap;word-wrap:break-word">{{ item.changes_text }}</div>{% endif %}
-{% if item.excerpt %}<div class="mail-content" dir="auto">{{ item.excerpt|safe }}</div>{% endif %}
-{% if item.media_text %}<p>{{ item.media_text }} {{ item.media_name }}</p>{% endif %}
-{% for a in item.attachments %}<p>附件：{% if a.link %}<a href="{{ a.link }}">{{ a.name }}</a>{% else %}{{ a.name }}{% endif %}（{{ a.size_display }}）</p>{% endfor %}
-<p style="font-size:12px;color:#666666">发现时间：{{ item.observed_display }}（{{ item.timezone }}）<br>最近成功同步：{{ item.last_synced_display }}<br>本次规则：{{ item.rule_text }}</p>
-{% if item.link %}<p><a href="{{ item.link }}" style="color:#075985;text-decoration:underline">{{ item.action_text }}</a></p>{% endif %}
-</div>
-{% endfor %}
+{% from "items.html" import render_item %}
+{% for item in digest_items|default([]) %}{{ render_item(item) }}{% endfor %}
 {% if link %}<p style="Margin:24px 0 10px"><a href="{{ link }}" style="color:#075985;text-decoration:underline;font-weight:bold">{{ action_text }}</a></p><p style="font-size:12px;color:#666666;Margin:0;word-wrap:break-word;overflow-wrap:anywhere">{{ link }}</p>{% endif %}
 <table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" style="Margin-top:24px;border-top:1px solid #dddddd"><tr><td style="padding-top:14px;font-size:12px;line-height:1.7;color:#666666">系统发现时间：{{ observed_display }}（{{ timezone }}）<br>最近成功同步：{{ last_synced_display }}<br>邮件生成时间：{{ rendered_display }}<br>本次规则：{{ rule_text }}<p style="Margin:10px 0 0">系统发现时间不等于老师上传或修改时间。提交状态以最近同步为准。</p></td></tr></table>
 </td></tr>

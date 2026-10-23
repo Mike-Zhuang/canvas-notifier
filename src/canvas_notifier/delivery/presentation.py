@@ -153,6 +153,8 @@ def present(payload, *, now=None):
     descriptions = {
         "assignment_created": "课程发布了一项新的作业或测验。请查看任务说明和适用时间。",
         "assignment_content_changed": "这项任务的内容发生了变化。请留意老师更新后的要求。",
+        "assignment_order_changed": "作业在课程列表中的排序位置调整了，未据此认定题目正文或截止时间改变。",
+        "assignment_access_changed": "作业的发布、隐藏或锁定状态发生变化，请留意是否仍能访问或提交。",
         "assignment_dates_changed": "任务时间已经调整，提醒计划会按新的时间重新计算。",
         "grade_published": "这项任务的成绩已对你可见。",
         "grade_changed": "学生可见成绩发生了变化。",
@@ -173,6 +175,10 @@ def present(payload, *, now=None):
         "baseline_digest": "以下是首次同步后需要留意的未来任务。历史内容已归档。",
         "iam_recovered": "IAM 已重新确认本人身份，Canvas 会话恢复。",
         "iam_login_failed": "IAM 自动登录需要处理，请查看连接与健康页面。",
+        "course_batch": "本轮发现的同课程更新已合并。以下逐项保留完整内容、日期、文件信息及关联变化。",
+        "planner_changed": "该学习计划的状态发生变化；关联作业的信息和提交状态见下方。",
+        "module_changed": "课程模块的目录或学习要求发生变化，具体变化见下方。",
+        "module_item_created": "课程模块新增了一个内容入口；同名文件或作业的关联记录已放在一起。",
     }
     p["explanation"] = descriptions.get(kind, "检测到课程内容或服务状态发生以下变化。")
     if kind.startswith("grade_") and not p.get("score_in_email"):
@@ -242,6 +248,7 @@ def present(payload, *, now=None):
         {**item, "size_display": file_size(item.get("size"))} for item in p.get("attachments", [])
     ]
     p["digest_items"] = [present(item, now=now) for item in p.get("digest_items", [])]
+    p["related_items"] = [present(item, now=now) for item in p.get("related_items", [])]
     p["preheader"] = " · ".join(
         v for v in (p.get("label"), p.get("course"), p.get("title"), p["remaining"]) if v
     )

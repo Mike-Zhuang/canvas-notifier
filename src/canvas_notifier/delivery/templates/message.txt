@@ -25,25 +25,14 @@ Canvas · {{ label }}
 课程内容与反馈
 {{ excerpt_text }}
 {% endif %}
+{% if image_note %}{{ image_note }}
+{% endif %}
 {% for attachment in attachments %}
 附件：{{ attachment.name }}（{{ attachment.size_display }}）
 {{ attachment.link }}
 {% endfor %}
-{% for item in digest_items|default([]) %}
-{{ item.course }} · {{ item.label }} · {{ item.title }}
-{% for name,value in item.facts %}{{ name }}：{{ value }}
-{% endfor %}{{ item.changes_text }}
-{{ item.excerpt_text }}
-{% if item.author_email %}作者邮箱：{{ item.author_email }}{% endif %}
-{% if item.author_profile_url %}作者资料：{{ item.author_profile_url }}{% endif %}
-{% if item.author_avatar_url %}作者头像：{{ item.author_avatar_url }}{% endif %}
-{% if item.media_text %}{{ item.media_text }} {{ item.media_name }}{% endif %}
-系统发现时间：{{ item.observed_display }}（{{ item.timezone }}）
-最近成功同步：{{ item.last_synced_display }}
-本次规则：{{ item.rule_text }}
-{% for a in item.attachments %}附件：{{ a.name }}（{{ a.size_display }}） {{ a.link }}
-{% endfor %}{{ item.link }}
-{% endfor %}
+{% from "items.txt" import render_item %}
+{% for item in digest_items|default([]) %}{{ render_item(item) }}{% endfor %}
 {% if link %}
 {{ action_text }}：{{ link }}
 {% endif %}

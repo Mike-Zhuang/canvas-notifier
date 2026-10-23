@@ -1,0 +1,19 @@
+{% macro render_item(item, related=false) %}
+{% if related %}关联变化 · {% endif %}{{ item.course }} · {{ item.label }} · {{ item.title }}
+{{ item.explanation }}
+{% if item.boundary_display %}{{ item.label }}：{{ item.boundary_display }}（{{ item.timezone }}） {{ item.remaining }}
+{% endif %}{% for name,value in item.facts %}{{ name }}：{{ value }}
+{% endfor %}{{ item.changes_text }}
+{{ item.excerpt_text }}
+{% if item.image_note %}{{ item.image_note }}
+{% endif %}{% if item.author_email %}作者邮箱：{{ item.author_email }}
+{% endif %}{% if item.author_profile_url %}作者资料：{{ item.author_profile_url }}
+{% endif %}{% if item.author_avatar_url %}作者头像：{{ item.author_avatar_url }}
+{% endif %}{% if item.media_text %}{{ item.media_text }} {{ item.media_name }}
+{% endif %}系统发现时间：{{ item.observed_display }}（{{ item.timezone }}）
+最近成功同步：{{ item.last_synced_display }}
+本次规则：{{ item.rule_text }}
+{% for a in item.attachments %}附件：{{ a.name }}（{{ a.size_display }}） {{ a.link }}
+{% endfor %}{{ item.link }}
+{% for record in item.related_items %}{{ render_item(record, true) }}{% endfor %}
+{% endmacro %}

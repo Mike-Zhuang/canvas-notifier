@@ -13,6 +13,8 @@ LABELS = {
     "assignment_created": "新任务",
     "assignment_content_changed": "任务内容变化",
     "assignment_dates_changed": "任务时间变化",
+    "assignment_order_changed": "作业排序调整",
+    "assignment_access_changed": "作业访问状态变化",
     "grade_published": "成绩发布",
     "grade_changed": "成绩变化",
     "submission_comment_added": "新的教师反馈",
@@ -92,10 +94,25 @@ async def enqueue(
     sync_run_id=None,
 ):
     now = now or now_utc()
-    rule_key = resource.key if resource else ""
+    data = resource.data if resource else {}
+    assignment = resource if resource and resource.kind == "assignment" else None
     if resource and resource.kind == "submission":
-        rule_key = f"assignment:{resource.course_id}:{resource.data.get('assignment_id')}"
-    rule, sources = await effective_rules(session, resource.course_id if resource else "", rule_key)
+        assignment = await session.get(
+            Resource, f"assignment:{resource.course_id}:{data.get('assignment_id')}"
+        )
+    elif resource and resource.kind == "planner" and data.get("plannable_type") == "assignment":
+        assignment = await session.scalar(
+            select(Resource).where(
+                Resource.kind == "assignment", Resource.external_id == str(data.get("plannable_id"))
+            )
+        )
+    course_id = assignment.course_id if assignment else resource.course_id if resource else ""
+    if not course_id and resource:
+        course_id = str(data.get("_email", {}).get("course_id") or "")
+    rule_key = assignment.key if assignment else resource.key if resource else ""
+    if resource and resource.kind == "submission" and assignment is None:
+        rule_key = f"assignment:{course_id}:{data.get('assignment_id')}"
+    rule, sources = await effective_rules(session, course_id, rule_key)
     mode = mode_override or rule.events.get(kind, rule.default_event)
     if kind != "test" and (not rule.enabled or mode == "off"):
         return "suppressed_by_rule"
@@ -108,12 +125,7 @@ async def enqueue(
     )
     if not targets:
         return "no_recipient"
-    data = resource.data if resource else {}
-    course = (
-        await session.get(Resource, f"course::{resource.course_id}")
-        if resource and resource.course_id
-        else None
-    )
+    course = await session.get(Resource, f"course::{course_id}") if course_id else None
     title = (
         data.get("name")
         or data.get("title")
@@ -122,15 +134,12 @@ async def enqueue(
         or data.get("full_name")
         or "Canvas 更新"
     )
-    assignment = resource if resource and resource.kind == "assignment" else None
-    if resource and resource.kind == "submission":
-        assignment = await session.get(
-            Resource, f"assignment:{resource.course_id}:{data.get('assignment_id')}"
-        )
-        if assignment:
-            title = assignment.data.get("name", title)
+    if assignment:
+        title = assignment.data.get("name", title)
+    elif resource and resource.kind == "planner":
+        title = (data.get("plannable") or {}).get("title") or title
     link = resource_link(resource, settings.canvas_base_url) if resource else ""
-    if not link and assignment:
+    if assignment and (not link or resource.kind == "planner"):
         link = resource_link(assignment, settings.canvas_base_url)
     submission = resource if resource and resource.kind == "submission" else None
     if assignment and submission is None:
@@ -163,11 +172,29 @@ async def enqueue(
         rule_text = "每日摘要" if mode == "digest" else "即时事件通知"
     payload = {
         "kind": kind,
-        "sync_run_id": sync_run_id if resource and resource.kind in ("file", "folder") else None,
-        "file_batch": f"{sync_run_id}:{resource.course_id}"
-        if sync_run_id and resource and resource.kind in ("file", "folder")
-        else None,
+        "sync_run_id": sync_run_id if course_id else None,
+        "course_batch": (
+            f"{sync_run_id}:{course_id}"
+            if sync_run_id and course_id
+            else f"reminder:{course_id}:{boundary.isoformat()}"
+            if reminder_keys and boundary and course_id
+            else None
+        ),
+        "resource_key": resource.key if resource else "",
+        "entity_key": (
+            assignment.key
+            if assignment
+            else f"file:{course_id}:{data['content_id']}"
+            if resource
+            and resource.kind == "module_item"
+            and data.get("type") == "File"
+            and data.get("content_id")
+            else resource.key
+            if resource
+            else ""
+        ),
         "canvas_origin": settings.canvas_base_url,
+        "course_id": course_id,
         "label": LABELS.get(kind, kind.replace("_", " ")),
         "title": re.sub(r"[\r\n]+", " ", title)[:200],
         "course": course.data.get("name", "") if course else "",
@@ -189,6 +216,7 @@ async def enqueue(
         "folder_id": data.get("folder_id") if resource and resource.kind == "file" else None,
         "author": comment_data.get("author_name") or feedback.get("author_name"),
         "resource_kind": resource.kind if resource else "",
+        "content_images": data.get("content_images", []),
         "source_created_at": email_data.get("source_created_at"),
         "source_modified_at": email_data.get("source_modified_at") or data.get("modified_at"),
         "source_updated_at": email_data.get("source_updated_at") or data.get("updated_at"),

@@ -1,0 +1,20 @@
+{% macro render_item(item, related=false) %}
+<div style="border-top:1px solid #dddddd;Margin-top:24px;padding-top:16px">
+<p style="Margin:0 0 6px;color:#666666">{% if related %}关联变化 · {% endif %}{{ item.course }} · {{ item.label }}</p>
+<h2 dir="auto" style="font-size:17px;Margin:6px 0;word-wrap:break-word">{{ item.title }}</h2>
+<p>{{ item.explanation }}</p>
+{% if item.boundary_display %}<p><strong>{{ item.remaining }}</strong><br>{{ item.label }}：{{ item.boundary_display }}（{{ item.timezone }}）</p>{% endif %}
+{% for name,value in item.facts %}<p style="Margin:4px 0"><strong>{{ name }}：</strong>{{ value }}</p>{% endfor %}
+{% if item.author_email %}<p>作者邮箱：<a href="mailto:{{ item.author_email }}">{{ item.author_email }}</a></p>{% endif %}
+{% if item.author_profile_url %}<p><a href="{{ item.author_profile_url }}">查看作者资料</a></p>{% endif %}
+{% if item.author_avatar_url %}<p><a href="{{ item.author_avatar_url }}">查看作者头像</a></p>{% endif %}
+{% if item.changes_text %}<div dir="auto" style="white-space:pre-wrap;word-wrap:break-word">{{ item.changes_text }}</div>{% endif %}
+{% if item.excerpt %}<div class="mail-content" dir="auto">{{ item.excerpt|safe }}</div>{% endif %}
+{% if item.image_note %}<p style="font-size:12px;color:#666666">{{ item.image_note }}</p>{% endif %}
+{% if item.media_text %}<p>{{ item.media_text }} {{ item.media_name }}</p>{% endif %}
+{% for a in item.attachments %}<p>附件：{% if a.link %}<a href="{{ a.link }}">{{ a.name }}</a>{% else %}{{ a.name }}{% endif %}（{{ a.size_display }}）</p>{% endfor %}
+<p style="font-size:12px;color:#666666">发现时间：{{ item.observed_display }}（{{ item.timezone }}）<br>最近成功同步：{{ item.last_synced_display }}<br>本次规则：{{ item.rule_text }}</p>
+{% if item.link %}<p><a href="{{ item.link }}" style="color:#075985;text-decoration:underline">{{ item.action_text }}</a></p>{% endif %}
+{% for record in item.related_items %}{{ render_item(record, true) }}{% endfor %}
+</div>
+{% endmacro %}

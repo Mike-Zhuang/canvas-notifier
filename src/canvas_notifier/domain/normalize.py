@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 
 import bleach
 
+from canvas_notifier.domain.body_images import body_images
 from canvas_notifier.domain.mail_metadata import feedback_metadata, source_time
 from canvas_notifier.domain.time import parse_time
 
@@ -157,6 +158,8 @@ def clean_email_html(value: str) -> str:
 
 
 def normalize(kind: str, data: dict, origin: str, course_id="") -> dict:
+    raw_body = data.get("message") or data.get("description") or data.get("body") or ""
+    email_body, images = body_images(raw_body, origin)
     result = {k: v for k, v in data.items() if k in COMMON | FIELDS.get(kind, set())}
     for key, value in list(result.items()):
         if key in TEXT_FIELDS and isinstance(value, str):
@@ -166,6 +169,8 @@ def normalize(kind: str, data: dict, origin: str, course_id="") -> dict:
                 result[key] = parse_time(value).isoformat()
         if key == "id" or key.endswith("_id"):
             result[key] = str(value) if value is not None else None
+    if any(key in data for key in TEXT_FIELDS):
+        result["content_images"] = images
     if kind == "course":
         result["term"] = (
             {k: data["term"].get(k) for k in ("id", "start_at", "end_at")} if data.get("term") else None
@@ -208,11 +213,12 @@ def normalize(kind: str, data: dict, origin: str, course_id="") -> dict:
     if isinstance(data.get("attachment"), dict):
         attachments.append(data["attachment"])
     result["_email"] = {
+        "course_id": str(data.get("course_id") or "") if kind == "planner" else course_id,
         "source_created_at": source_time(data.get("created_at")),
         "source_updated_at": source_time(data.get("updated_at")),
         "source_modified_at": source_time(data.get("modified_at")),
         "source_published_at": source_time(data.get("posted_at")),
-        "body": clean_email_html(data.get("message") or data.get("description") or data.get("body") or ""),
+        "body": clean_email_html(email_body),
         "attachments": [{k: a.get(k) for k in ("id", "display_name", "size")} for a in attachments],
         "comments": {
             str(c["id"]): {
@@ -280,7 +286,7 @@ def changes_for(kind, before, after, user_id=""):
     diff = {
         k: {"before": before.get(k), "after": after.get(k)}
         for k in after
-        if k != "_email" and before.get(k) != after.get(k)
+        if k != "_email" and before.get(k) != after.get(k) and not (k == "content_images" and k not in before)
     }
     if not diff:
         return []
@@ -322,9 +328,19 @@ def changes_for(kind, before, after, user_id=""):
         dates = {k: v for k, v in diff.items() if k in ("due_at", "lock_at", "unlock_at")}
         if dates:
             events.append(("assignment_dates_changed", dates))
-        content = {k: v for k, v in diff.items() if k not in ("due_at", "lock_at", "unlock_at")}
+        ordering = {k: v for k, v in diff.items() if k == "position"}
+        access = {
+            k: v
+            for k, v in diff.items()
+            if k in {"locked", "locked_for_user", "hidden", "hidden_for_user", "published", "workflow_state"}
+        }
+        content = {k: v for k, v in diff.items() if k not in dates and k not in ordering and k not in access}
         if content:
             events.append(("assignment_content_changed", content))
+        if access:
+            events.append(("assignment_access_changed", access))
+        if ordering:
+            events.append(("assignment_order_changed", ordering))
     else:
         events.append((kind + "_changed", diff))
     return events

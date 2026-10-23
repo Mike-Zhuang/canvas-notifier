@@ -10,6 +10,8 @@ from sqlalchemy import select, update
 
 from canvas_notifier.config import read_secret
 from canvas_notifier.db import Delivery, Lease, Reminder, Resource, SyncRun
+from canvas_notifier.delivery.batching import batch_payload
+from canvas_notifier.delivery.images import embed_images, load_images
 from canvas_notifier.domain.normalize import complete
 from canvas_notifier.domain.time import now_utc, parse_time
 from canvas_notifier.scheduling.planner import context
@@ -20,10 +22,11 @@ ENV = Environment(
 )
 
 
-def render_message(settings, delivery, *, payload=None):
+def render_message(settings, delivery, *, payload=None, inline_images=None):
     from canvas_notifier.delivery.presentation import present
 
     p = present(payload or delivery.payload)
+    embedded = embed_images(p, inline_images or {})
     message = EmailMessage()
     subject_parts = [value for value in (p.get("course"), p["title"]) if value]
     message["Subject"] = (
@@ -33,6 +36,11 @@ def render_message(settings, delivery, *, payload=None):
     message["Message-ID"], message["Date"] = delivery.message_id, format_datetime(now_utc())
     message.set_content(ENV.get_template("message.txt").render(**p))
     message.add_alternative(ENV.get_template("message.html").render(**p), subtype="html")
+    if embedded:
+        html_part = message.get_body(preferencelist=("html",))
+        assert isinstance(html_part, EmailMessage)
+        for cid, (content, subtype) in embedded.items():
+            html_part.add_related(content, maintype="image", subtype=subtype, cid=f"<{cid}>", disposition="inline")
     return message
 
 
@@ -63,7 +71,14 @@ async def applicable(session, delivery, now):
         key = resource.key if resource else ""
         if resource and resource.kind == "submission":
             key = f"assignment:{resource.course_id}:{resource.data.get('assignment_id')}"
-        rule, _ = await effective_rules(session, resource.course_id if resource else "", key)
+        if (
+            resource
+            and resource.kind == "planner"
+            and delivery.payload.get("entity_key", "").startswith("assignment:")
+        ):
+            key = delivery.payload["entity_key"]
+        course_id = delivery.payload.get("course_id", resource.course_id if resource else "")
+        rule, _ = await effective_rules(session, course_id, key)
         if not rule.enabled or rule.events.get(delivery.payload.get("kind"), rule.default_event) == "off":
             return False, "事件已被当前规则关闭"
         if rule.recipients is not None and delivery.recipient not in recipients(",".join(rule.recipients)):
@@ -143,9 +158,11 @@ async def _deliver_claimed_batch(settings, sessions, *, sender=send, limit=30, n
                     continue
             ready.append(row)
         seeds = ready[:limit]
-        batches = {(r.payload.get("file_batch"), r.recipient) for r in seeds if r.payload.get("file_batch")}
+        batches = {
+            (r.payload.get("course_batch"), r.recipient) for r in seeds if r.payload.get("course_batch")
+        }
         candidates = [
-            r.id for r in ready if r in seeds or (r.payload.get("file_batch"), r.recipient) in batches
+            r.id for r in ready if r in seeds or (r.payload.get("course_batch"), r.recipient) in batches
         ]
     claimed = []
     for delivery_id in candidates:
@@ -157,7 +174,7 @@ async def _deliver_claimed_batch(settings, sessions, *, sender=send, limit=30, n
             )
             if result.rowcount:
                 claimed.append(delivery_id)
-    # 摘要按收件人分组，普通即时事件仍独立投递。
+    # 同轮课程更新按收件人合并；不同课程、轮次和显式摘要规则分别投递。
     groups = {}
     async with sessions() as session, session.begin():
         for delivery_id in claimed:
@@ -168,8 +185,8 @@ async def _deliver_claimed_batch(settings, sessions, *, sender=send, limit=30, n
                 row.available_at = now + timedelta(minutes=5)
                 continue
             group_key = (
-                ("files", row.recipient, row.payload["file_batch"])
-                if row.payload.get("file_batch") and not row.payload.get("digest")
+                ("course", row.recipient, row.payload["course_batch"])
+                if row.payload.get("course_batch") and not row.payload.get("digest")
                 else ("digest", row.recipient)
                 if row.payload.get("digest")
                 else ("single", row.id)
@@ -179,41 +196,14 @@ async def _deliver_claimed_batch(settings, sessions, *, sender=send, limit=30, n
     for rows in groups.values():
         primary = rows[0]
         payload = None
-        if primary.payload.get("digest") or (primary.payload.get("file_batch") and len(rows) > 1):
-            payload = {
-                **primary.payload,
-                "label": "课程资料更新" if primary.payload.get("file_batch") else "更新摘要",
-                "title": f"{len(rows)} 项更新",
-                "excerpt": "",
-                "kind": "file_batch" if primary.payload.get("file_batch") else "digest",
-                "resource_kind": "",
-                "source_created_at": None,
-                "source_modified_at": None,
-                "source_updated_at": None,
-                "digest_items": [dict(r.payload) for r in rows],
-                "course": primary.payload.get("course", "") if primary.payload.get("file_batch") else "",
-                "link": "",
-                "file_size": None,
-                "filename": None,
-                "content_type": None,
-                "folder_id": None,
-                "is_assignment": False,
-                "points_possible": None,
-                "due_at": None,
-                "lock_at": None,
-                "unlock_at": None,
-                "submitted_at": None,
-                "attachments": [],
-                "changes": {
-                    "items": [
-                        {"title": r.payload["title"], "label": r.payload["label"], "link": r.payload["link"]}
-                        for r in rows
-                    ]
-                },
-            }
+        if primary.payload.get("digest") or (primary.payload.get("course_batch") and len(rows) > 1):
+            payload = batch_payload(rows)
         error = None
         try:
-            await sender(settings, render_message(settings, primary, payload=payload))
+            image_data = await load_images(settings, payload or primary.payload)
+            await sender(
+                settings, render_message(settings, primary, payload=payload, inline_images=image_data)
+            )
         except Exception as exc:
             # SMTP 错误可能回显邮箱或密码，日志只保留安全类型和 SMTP 状态码。
             error = type(exc).__name__ + (":" + str(exc.code) if hasattr(exc, "code") else "")
