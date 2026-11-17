@@ -20,6 +20,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from canvas_notifier.config import Settings, read_secret
 from canvas_notifier.db import Delivery, Event, Health, Reminder, Resource, Rule, Scope, SyncRun, database
 from canvas_notifier.delivery.queue import LABELS
+from canvas_notifier.domain.normalize import complete
 from canvas_notifier.domain.time import now_utc, parse_time
 from canvas_notifier.scheduling.planner import rebuild
 from canvas_notifier.scheduling.rules import Rules, duration, effective_rules
@@ -165,9 +166,13 @@ def create_app(settings=None, sessions=None):
         return RedirectResponse("/login", 303)
 
     @app.get("/", response_class=HTMLResponse)
-    async def overview(request: Request, q: str = "", show: str = "future"):
+    async def overview(
+        request: Request, q: str = "", show: str = "all", course: str = "", status: str = "incomplete"
+    ):
         if not authenticated(request):
             return RedirectResponse("/login", 303)
+        show = show if show in {"all", "future"} else "all"
+        status = status if status in {"all", "incomplete"} else "incomplete"
         async with sessions() as session:
             tasks = list((await session.scalars(select(Resource).where(Resource.kind == "assignment"))).all())
             courses = {
@@ -186,11 +191,18 @@ def create_app(settings=None, sessions=None):
                 .where(Delivery.status.in_(["pending", "retry", "failed"]))
             )
         rows = []
+        now = now_utc()
         for task in tasks:
+            if course and task.course_id != course:
+                continue
+            submission = submissions.get(f"submission:{task.course_id}:{task.external_id}")
+            done = complete(task.data, submission.data if submission else {}, task.local)
+            if status == "incomplete" and done:
+                continue
             times = [parse_time(task.data.get(k)) for k in ("due_at", "lock_at") if task.data.get(k)]
             if task.local.get("personal_at"):
                 times.append(parse_time(task.local["personal_at"]))
-            upcoming = [dt for dt in times if dt >= now_utc()]
+            upcoming = [dt for dt in times if dt >= now]
             if show == "future" and times and not upcoming:
                 continue
             if (
@@ -205,13 +217,14 @@ def create_app(settings=None, sessions=None):
                 {
                     "task": task,
                     "course": courses.get(task.course_id),
-                    "submission": submissions.get(f"submission:{task.course_id}:{task.external_id}"),
+                    "submission": submission,
+                    "done": done,
                     "has_time": bool(times),
                     "next_time": min(upcoming)
                     if upcoming
                     else max(times)
                     if times
-                    else now_utc() + timedelta(days=10000),
+                    else now + timedelta(days=10000),
                 }
             )
         rows.sort(key=lambda row: row["next_time"])
@@ -228,6 +241,8 @@ def create_app(settings=None, sessions=None):
                 pending=pending,
                 q=q,
                 show=show,
+                course=course,
+                status=status,
                 healthy=sum(s.status == "ok" for s in scopes),
                 total=len(scopes),
             ),

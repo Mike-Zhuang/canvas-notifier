@@ -120,3 +120,58 @@ async def test_custom_ten_character_admin_password(settings, sessions):
         )
         assert response.status_code == 303
         assert (await client.get("/")).status_code == 200
+
+
+async def test_overview_course_and_incomplete_filters(settings, sessions):
+    from datetime import timedelta
+
+    from canvas_notifier.db import Resource
+    from canvas_notifier.domain.time import now_utc
+
+    submitted = {"submitted_at": now_utc().isoformat()}
+    cases = [
+        ("pending", "1", {}, {}, "online_upload"),
+        ("submitted", "1", submitted, {}, "online_upload"),
+        ("excused", "1", {"excused": True}, {}, "online_upload"),
+        ("local", "1", {}, {"completed": True}, "on_paper"),
+        ("redo", "1", {**submitted, "redo_request": True}, {"completed": True}, "online_upload"),
+        ("missing", "1", {**submitted, "missing": True}, {}, "online_upload"),
+        ("external", "1", submitted, {}, "external_tool"),
+        ("overdue", "1", {}, {}, "online_upload"),
+        ("other", "2", {}, {}, "online_upload"),
+    ]
+    async with sessions() as db, db.begin():
+        for cid in ("1", "2"):
+            db.add(Resource(key=f"course::{cid}", kind="course", external_id=cid,
+                            scope="courses", data={"name": f"课程{cid}"}))
+        for name, cid, sub, local, submission_type in cases:
+            data = {"name": name, "submission_types": [submission_type]}
+            if name == "overdue":
+                data["due_at"] = (now_utc() - timedelta(days=1)).isoformat()
+            db.add(Resource(key=f"assignment:{cid}:{name}", kind="assignment", external_id=name,
+                            course_id=cid, scope=f"{cid}:assignments", data=data, local=local))
+            db.add(Resource(key=f"submission:{cid}:{name}", kind="submission", external_id=name,
+                            course_id=cid, scope=f"{cid}:submissions", data=sub))
+
+    def task_names(response):
+        assert response.status_code == 200
+        return set(re.findall(r'<h3>([^<]+)</h3>', response.text)) & {c[0] for c in cases}
+
+    app = create_app(settings, sessions)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
+    ) as client:
+        await sign_in(client)
+        default = await client.get("/")
+        assert task_names(default) == {"pending", "redo", "missing", "external", "overdue", "other"}
+        assert "需要重新提交" in default.text
+        assert task_names(await client.get("/?course=2")) == {"other"}
+        assert task_names(await client.get("/?course=1&status=all&q=submitted")) == {"submitted"}
+        assert task_names(await client.get("/?course=1&show=future")) == {
+            "pending", "redo", "missing", "external"
+        }
+        assert task_names(await client.get("/?status=all")) == {c[0] for c in cases}
+        empty = await client.get("/?course=2&q=pending")
+        assert task_names(empty) == set()
+        assert "目前没有匹配的任务" in empty.text
+        assert task_names(await client.get("/?status=invalid")) == task_names(default)
