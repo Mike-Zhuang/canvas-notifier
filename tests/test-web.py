@@ -128,7 +128,12 @@ async def test_overview_course_and_incomplete_filters(settings, sessions):
     from canvas_notifier.db import Resource
     from canvas_notifier.domain.time import now_utc
 
-    submitted = {"submitted_at": now_utc().isoformat()}
+    now = now_utc()
+    past = (now - timedelta(days=1)).isoformat()
+    future = (now + timedelta(days=1)).isoformat()
+    earlier = (now - timedelta(days=2)).isoformat()
+    later = (now + timedelta(days=2)).isoformat()
+    submitted = {"submitted_at": past}
     cases = [
         ("pending", "1", {}, {}, "online_upload"),
         ("submitted", "1", submitted, {}, "online_upload"),
@@ -137,17 +142,34 @@ async def test_overview_course_and_incomplete_filters(settings, sessions):
         ("redo", "1", {**submitted, "redo_request": True}, {"completed": True}, "online_upload"),
         ("missing", "1", {**submitted, "missing": True}, {}, "online_upload"),
         ("external", "1", submitted, {}, "external_tool"),
-        ("overdue", "1", {}, {}, "online_upload"),
+        ("overdue", "1", {}, {"personal_at": future}, "online_upload"),
+        ("closed", "1", {}, {}, "online_upload"),
         ("other", "2", {}, {}, "online_upload"),
+        ("old", "3", {}, {}, "online_upload"),
+        ("next_term", "4", {}, {}, "online_upload"),
+        ("unknown_term", "5", {}, {}, "online_upload"),
     ]
     async with sessions() as db, db.begin():
-        for cid in ("1", "2"):
-            db.add(Resource(key=f"course::{cid}", kind="course", external_id=cid,
-                            scope="courses", data={"name": f"课程{cid}"}))
+        periods = [(past, future), (past, future), (earlier, past), (future, later), (None, None)]
+        for index, (start, end) in enumerate(periods, 1):
+            cid = str(index)
+            db.add(
+                Resource(
+                    key=f"course::{cid}",
+                    kind="course",
+                    external_id=cid,
+                    scope="courses",
+                    data={"name": f"课程{cid}", "term": {"start_at": start, "end_at": end}},
+                )
+            )
         for name, cid, sub, local, submission_type in cases:
             data = {"name": name, "submission_types": [submission_type]}
             if name == "overdue":
-                data["due_at"] = (now_utc() - timedelta(days=1)).isoformat()
+                data.update(due_at=past, lock_at=future)
+            if name == "closed":
+                data["lock_at"] = past
+            if name == "other":
+                data["due_at"] = future
             db.add(Resource(key=f"assignment:{cid}:{name}", kind="assignment", external_id=name,
                             course_id=cid, scope=f"{cid}:assignments", data=data, local=local))
             db.add(Resource(key=f"submission:{cid}:{name}", kind="submission", external_id=name,
@@ -163,14 +185,18 @@ async def test_overview_course_and_incomplete_filters(settings, sessions):
     ) as client:
         await sign_in(client)
         default = await client.get("/")
-        assert task_names(default) == {"pending", "redo", "missing", "external", "overdue", "other"}
+        assert task_names(default) == {"pending", "redo", "missing", "external", "other"}
         assert "需要重新提交" in default.text
         assert task_names(await client.get("/?course=2")) == {"other"}
         assert task_names(await client.get("/?course=1&status=all&q=submitted")) == {"submitted"}
         assert task_names(await client.get("/?course=1&show=future")) == {
-            "pending", "redo", "missing", "external"
+            "pending", "redo", "missing", "external", "overdue"
         }
-        assert task_names(await client.get("/?status=all")) == {c[0] for c in cases}
+        assert task_names(await client.get("/?course=1&show=all")) == {
+            "pending", "redo", "missing", "external", "overdue", "closed"
+        }
+        assert task_names(await client.get("/?course=3&term=all")) == {"old"}
+        assert task_names(await client.get("/?status=all&show=all&term=all")) == {c[0] for c in cases}
         empty = await client.get("/?course=2&q=pending")
         assert task_names(empty) == set()
         assert "目前没有匹配的任务" in empty.text

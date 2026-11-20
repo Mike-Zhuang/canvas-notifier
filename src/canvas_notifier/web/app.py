@@ -167,11 +167,17 @@ def create_app(settings=None, sessions=None):
 
     @app.get("/", response_class=HTMLResponse)
     async def overview(
-        request: Request, q: str = "", show: str = "all", course: str = "", status: str = "incomplete"
+        request: Request,
+        q: str = "",
+        show: str = "not_overdue",
+        course: str = "",
+        status: str = "incomplete",
+        term: str = "current",
     ):
         if not authenticated(request):
             return RedirectResponse("/login", 303)
-        show = show if show in {"all", "future"} else "all"
+        show = show if show in {"all", "future", "not_overdue"} else "not_overdue"
+        term = term if term in {"all", "current"} else "current"
         status = status if status in {"all", "incomplete"} else "incomplete"
         async with sessions() as session:
             tasks = list((await session.scalars(select(Resource).where(Resource.kind == "assignment"))).all())
@@ -192,14 +198,26 @@ def create_app(settings=None, sessions=None):
             )
         rows = []
         now = now_utc()
+        current_courses = set()
+        if term == "current":
+            for cid, resource in courses.items():
+                period = resource.data.get("term") or {}
+                start = parse_time(period.get("start_at"))
+                end = parse_time(period.get("end_at"))
+                if start is not None and end is not None and start <= now < end:
+                    current_courses.add(cid)
         for task in tasks:
             if course and task.course_id != course:
+                continue
+            if term == "current" and task.course_id not in current_courses:
                 continue
             submission = submissions.get(f"submission:{task.course_id}:{task.external_id}")
             done = complete(task.data, submission.data if submission else {}, task.local)
             if status == "incomplete" and done:
                 continue
             times = [parse_time(task.data.get(k)) for k in ("due_at", "lock_at") if task.data.get(k)]
+            if show == "not_overdue" and any(dt < now for dt in times):
+                continue
             if task.local.get("personal_at"):
                 times.append(parse_time(task.local["personal_at"]))
             upcoming = [dt for dt in times if dt >= now]
@@ -243,6 +261,7 @@ def create_app(settings=None, sessions=None):
                 show=show,
                 course=course,
                 status=status,
+                term=term,
                 healthy=sum(s.status == "ok" for s in scopes),
                 total=len(scopes),
             ),
