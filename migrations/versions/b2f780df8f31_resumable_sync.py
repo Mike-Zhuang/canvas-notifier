@@ -20,6 +20,15 @@ def upgrade():
             "UPDATE notification_rules SET data = json_remove(data, '$.score_in_email') "
             "WHERE json_type(data, '$.score_in_email') IS NOT NULL"
         )
+    # 旧版只有全局首次摘要标记；已建立作业基线的课程视为已发过摘要，升级后不再补发历史摘要。
+    op.execute(
+        "INSERT INTO health (name, status, updated_at, details) "
+        "SELECT DISTINCT 'initial_digest:' || s.course_id, 'created', h.updated_at, h.details "
+        "FROM sync_scopes s CROSS JOIN health h "
+        "WHERE h.name = 'initial_digest' AND h.status = 'created' "
+        "AND s.kind = 'assignment' AND s.baseline AND s.course_id <> ''"
+    )
+    op.execute("DELETE FROM health WHERE name = 'initial_digest'")
     op.add_column("resources", sa.Column("last_listed", sa.DateTime(timezone=True)))
     op.add_column("sync_scopes", sa.Column("scan_started", sa.DateTime(timezone=True)))
     op.add_column("sync_scopes", sa.Column("scan_urls", sa.JSON(none_as_null=True)))

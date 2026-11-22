@@ -248,10 +248,23 @@ async def test_migration_removes_only_the_removed_grade_preference(settings, mon
     try:
         async with sessions() as db, db.begin():
             db.add_all(Rule(scope=key, data=value) for key, value in rows.items())
+            db.add(Health(name="initial_digest", status="created"))
+            for key, cid, baseline in [("assignment:1:", "1", True), ("assignment:2:", "2", False)]:
+                await db.execute(
+                    text(
+                        "INSERT INTO sync_scopes (key, kind, course_id, baseline, pages, count, complete,"
+                        " status, verification) VALUES (:key, 'assignment', :cid, :baseline, 0, 0, :baseline,"
+                        " 'ok', 'live')"
+                    ),
+                    {"key": key, "cid": cid, "baseline": baseline},
+                )
         await asyncio.to_thread(command.upgrade, config, "head")
         async with sessions() as db:
             assert await db.scalar(text("SELECT version_num FROM alembic_version")) == "b2f780df8f31"
             migrated = (await db.scalars(select(Rule))).all()
+            digests = {h.name for h in (await db.scalars(select(Health))).all()}
+        # 已有基线的课程继承旧全局摘要标记；尚无基线的课程之后仍会收到首次摘要。
+        assert digests == {"initial_digest:1"}
         assert {row.scope: row.data for row in migrated} == {
             key: {k: v for k, v in data.items() if k != "score_in_email"} for key, data in rows.items()
         }
