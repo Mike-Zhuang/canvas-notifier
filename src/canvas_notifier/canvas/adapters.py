@@ -1,7 +1,8 @@
+from dataclasses import dataclass, field
 from datetime import timedelta
 from urllib.parse import quote
 
-from canvas_notifier.canvas.http import CanvasError
+from canvas_notifier.canvas.http import CanvasError, PageResult
 from canvas_notifier.domain.time import now_utc
 
 
@@ -10,6 +11,7 @@ async def courses(client):
         "/api/v1/courses",
         [("per_page", "100"), ("state[]", "available"), ("state[]", "completed"), ("include[]", "term")],
         kind="course",
+        scope_key="course::",
     )
 
 
@@ -18,7 +20,14 @@ async def assignments(client, course_id):
         f"/api/v1/courses/{course_id}/assignments",
         [("per_page", "100"), ("include[]", "submission")],
         kind="assignment",
+        scope_key=f"assignment:{course_id}:",
     )
+
+
+@dataclass
+class SubmissionPageResult(PageResult):
+    detail_ids: set[str] = field(default_factory=set)
+    failed_detail_ids: set[str] = field(default_factory=set)
 
 
 async def submissions(client, course_id, assignment_items):
@@ -31,9 +40,14 @@ async def submissions(client, course_id, assignment_items):
             ("include[]", "rubric_assessment"),
         ],
         kind="submission",
+        scope_key=f"submission:{course_id}:",
     )
-    if not result.complete:
+    if result.skipped:
         return result
+    if result.continues:
+        result.items = [item for item in result.items if str(item.get("user_id")) == client.user_id]
+        return result
+    result = SubmissionPageResult(**vars(result))
     merged = {
         str(item["assignment_id"]): item
         for item in result.items
@@ -48,18 +62,39 @@ async def submissions(client, course_id, assignment_items):
                 [("include[]", "submission_comments"), ("include[]", "rubric_assessment")],
                 kind="submission",
             )
-            if not isinstance(detail, dict) or str(detail.get("user_id")) != client.user_id:
+            if (
+                not isinstance(detail, dict)
+                or str(detail.get("user_id")) != client.user_id
+                or str(detail.get("assignment_id", aid)) != aid
+            ):
                 raise CanvasError("submission_identity_mismatch")
             merged[aid] = {**merged.get(aid, {}), **detail, "assignment_id": aid}
+            result.detail_ids.add(aid)
             result.pages += 1
         except CanvasError as error:
-            result.complete, result.error = False, error.code
+            result.complete = False
+            result.error = result.error or error.code
+            result.failed_detail_ids.add(aid)
     result.items = list(merged.values())
     return result
 
 
-async def content_scopes(client, course_id):
+async def content_scopes(client, course_id, pending=()):
     prefix = f"/api/v1/courses/{course_id}"
+    module_ids = set()
+    topics = set()
+    reply_entries = {}
+    # 父清单已翻到下一批时，仍须继续先前发现的子清单。
+    for scope in pending:
+        kind, _, suffix = scope.key.split(":", 2)
+        if kind == "module_item":
+            module_ids.add(suffix)
+        elif kind == "reply":
+            if ":" in suffix:
+                topic, entry = suffix.split(":", 1)
+                reply_entries.setdefault(topic, set()).add(entry)
+            else:
+                topics.add(suffix)
     for kind, endpoint, params in [
         ("announcement", "discussion_topics", [("only_announcements", "true")]),
         ("file", "files", []),
@@ -68,7 +103,12 @@ async def content_scopes(client, course_id):
         ("module", "modules", []),
         ("page", "pages", []),
     ]:
-        result = await client.paginate(f"{prefix}/{endpoint}", [("per_page", "100"), *params], kind=kind)
+        result = await client.paginate(
+            f"{prefix}/{endpoint}",
+            [("per_page", "100"), *params],
+            kind=kind,
+            scope_key=f"{kind}:{course_id}:",
+        )
         if kind == "discussion":
             result.items = [item for item in result.items if not item.get("is_announcement")]
         if kind == "page":
@@ -79,33 +119,58 @@ async def content_scopes(client, course_id):
                     result.pages += 1
                 except (CanvasError, KeyError, TypeError) as error:
                     result.complete, result.error = False, getattr(error, "code", "schema_changed")
+                    result.continues = False
         yield kind, "", result
         if kind == "module":
-            for item in result.items:
-                nested = await client.paginate(
-                    f"{prefix}/modules/{item['id']}/items", [("per_page", "100")], kind="module_item"
-                )
-                yield "module_item", str(item["id"]), nested
-        if kind == "discussion":
-            for item in result.items:
-                topic = str(item["id"])
-                entries = await client.paginate(
-                    f"{prefix}/discussion_topics/{topic}/entries", [("per_page", "100")], kind="reply"
-                )
-                # recent_replies 是截断预览，必须继续请求完整 replies 子资源。
-                yield "reply", topic, entries
-                for entry in entries.items:
-                    if entry.get("has_more_replies") or entry.get("recent_replies") or entry.get("replies"):
-                        replies = await client.paginate(
-                            f"{prefix}/discussion_topics/{topic}/entries/{entry['id']}/replies",
-                            [("per_page", "100")],
-                            kind="reply",
-                        )
-                        yield "reply", f"{topic}:{entry['id']}", replies
+            module_ids.update(str(item["id"]) for item in result.items)
+        elif kind == "discussion":
+            topics.update(str(item["id"]) for item in result.items)
+    for module_id in sorted(module_ids):
+        nested = await client.paginate(
+            f"{prefix}/modules/{module_id}/items",
+            [("per_page", "100")],
+            kind="module_item",
+            scope_key=f"module_item:{course_id}:{module_id}",
+        )
+        yield "module_item", module_id, nested
+    for topic in sorted(topics):
+        entries = await client.paginate(
+            f"{prefix}/discussion_topics/{topic}/entries",
+            [("per_page", "100")],
+            kind="reply",
+            scope_key=f"reply:{course_id}:{topic}",
+        )
+        yield "reply", topic, entries
+        for entry in entries.items:
+            entry_id = str(entry["id"])
+            if not (
+                entry.get("has_more_replies") or entry.get("recent_replies") or entry.get("replies")
+            ) and (
+                entry.get("has_more_replies") is False
+                or entry.get("recent_replies") == []
+                or entry.get("replies") == []
+            ):
+                # 明确无回复也要建空基线，第一条后续回复才不是历史数据。
+                yield "reply", f"{topic}:{entry_id}", PageResult(complete=True)
+                reply_entries.get(topic, set()).discard(entry_id)
+            else:
+                reply_entries.setdefault(topic, set()).add(entry_id)
+    for topic, entry_ids in sorted(reply_entries.items()):
+        for entry_id in sorted(entry_ids):
+            suffix = f"{topic}:{entry_id}"
+            replies = await client.paginate(
+                f"{prefix}/discussion_topics/{topic}/entries/{entry_id}/replies",
+                [("per_page", "100")],
+                kind="reply",
+                scope_key=f"reply:{course_id}:{suffix}",
+            )
+            yield "reply", suffix, replies
 
 
 async def global_scopes(client):
-    inbox = await client.paginate("/api/v1/conversations", [("per_page", "100")], kind="conversation")
+    inbox = await client.paginate(
+        "/api/v1/conversations", [("per_page", "100")], kind="conversation", scope_key="conversation::"
+    )
     for i, item in enumerate(inbox.items):
         try:
             detail, _ = await client.get(
@@ -115,6 +180,7 @@ async def global_scopes(client):
             inbox.pages += 1
         except (CanvasError, TypeError) as error:
             inbox.complete, inbox.error = False, getattr(error, "code", "schema_changed")
+            inbox.continues = False
     yield "conversation", inbox
     now = now_utc()
     for kind, path, params in [
@@ -129,4 +195,7 @@ async def global_scopes(client):
         ),
         ("planner_note", "/api/v1/planner_notes", []),
     ]:
-        yield kind, await client.paginate(path, [("per_page", "100"), *params], kind=kind)
+        yield (
+            kind,
+            await client.paginate(path, [("per_page", "100"), *params], kind=kind, scope_key=f"{kind}::"),
+        )

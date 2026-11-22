@@ -59,10 +59,11 @@ uv run canvas-notifier auth token-test --mode cookie
 登录完成后自动验证本人身份，仅保存 Canvas 主机 Cookie，文件位于 `secrets/canvas-cookies.json`。如果浏览器账号与数据库账号不同，会拒绝覆盖。
 
 启用备用通道前需验证 Cookie 对同一资源的读取能力。在 `.env` 中配置 `CANVAS_COOKIE_FALLBACK=true` 和 `CANVAS_COOKIE_RESOURCES`；仅名单中的资源允许从失效 Bearer 切换，403 不会触发切换。详见 [运行维护](docs/operations.md)。
+Cookie 备用通道正常时，认证仍显示正常并标注 Token 已失效。
 
 ## IAM 自动恢复
 
-可启用第三层恢复：Token 与 Canvas Cookie 都明确失效后，通过已授权 IAM 会话或保存的账号密码重新取得 Canvas Cookie。支持登录互斥、冷却、身份校验与原子保存；遇到验证码或增强认证会停止并报告。
+可启用第三层恢复：Token 与 Canvas Cookie 都明确失效后，优先使用已保存的 IAM SSO 会话。只有进入密码表单时才需要账号密码文件；遇到验证码或增强认证会停止，首次即告警，不重复提交。
 
 配置、命令和实测边界见 [IAM 自动恢复](docs/iam-authentication.md)。需要保存正常交互认证后的 IAM 会话时运行 `uv run canvas-notifier auth login --remember-iam`。账号密码放在 `secrets/iam-username`、`secrets/iam-password`，不要写进 `.env.example` 或源码。
 
@@ -77,15 +78,17 @@ uv run canvas-notifier auth token-test --mode cookie
 ```sh
 uv run canvas-notifier mail test
 uv run canvas-notifier sync --once
+# 可选：这次也扫描超过关注期限的课程
+uv run canvas-notifier sync --once --include-history
 uv run canvas-notifier reminders preview
 uv run canvas-notifier doctor
 ```
 
 管理站点支持全局、课程和单任务规则；单任务优先。正式截止 `due_at`、停止提交 `lock_at`、开放时间和个人计划分别建模。`due_at=null` 的任务不会漏掉 `lock_at` 提醒。
 
-规则偏移采用正 ISO 时长，如 `P3D, PT24H, PT1H`；空列表表示关闭该边界提醒。不支持不定长的月份。支持静默时段、每日摘要、逾期次数限制、仅未完成提醒、数据过旧时暂停、个人完成标记与暂缓。高级 JSON 支持部分字段继承、各类事件开关以及 `recipients` 覆盖。保存前可以预览实际触发时刻。
+规则偏移采用正 ISO 时长，如 `P3D, PT24H, PT1H`；空列表表示关闭该类提醒。课程和任务只保存不同于上一级的设置；高级 JSON 单独编辑本级覆盖，不会复制继承的收件人。任务的固定关注或延长历史期限也会延长其课程的自动采集。保存前可预览提醒时间。主页默认仅本学期、仅未逾期、仅未完成；活跃课程缺少学期日期时标为「学期未定」，任务行显示本人可见的成绩。
 
-首次成功采集按资源范围建立历史基线，不会逐条推送历史成绩。普通 SMTP 为可重试投递，在“已接受但尚未记账时进程崩溃”的边界可能重复；不承诺 exactly-once。SMTP 已接受也不等于收件箱已送达。
+每个范围首次采集只建立基线，不逐条推送历史成绩；各课程在建立作业基线且首次摘要成功入队后才记为已创建。未开放的功能不算失败；分页触及预算时，下轮从验证过的游标继续。服务端给出长时间 `Retry-After` 时，重启或手动同步也不会提前请求。同步告警阈值可设为 `SYNC_ALERT_FAILURES=1`、`SYNC_ALERT_SECONDS=0`。SMTP 已接受不等于最终送达；若进程在接受后记账前崩溃，可能重发。
 
 ## 离线体验和开发收件器
 

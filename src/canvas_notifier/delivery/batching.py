@@ -20,43 +20,17 @@ def batch_payload(rows):
     course_batch = bool(primary.get("course_batch")) and not primary.get("digest")
     items = related_items([row.payload for row in rows])
     return {
-        **primary,
+        # 批次只继承投递元数据；得分、时间和正文等事项属性留在子项内。
+        **{
+            key: primary[key]
+            for key in ("canvas_origin", "observed_at", "last_synced_at", "timezone", "manage_url")
+            if key in primary
+        },
         "kind": "course_batch" if course_batch else "digest",
         "label": "课程更新" if course_batch else "更新摘要",
         "title": f"{len(items)} 项更新"
         + (f"（含 {len(rows)} 条关联记录）" if len(items) != len(rows) else ""),
         "course": primary.get("course", "") if course_batch else "",
         "digest_items": items,
-        "related_items": [],
-        "excerpt": "",
-        "link": "",
-        "file_size": None,
-        "filename": None,
-        "content_type": None,
-        "folder_id": None,
-        "resource_kind": "",
-        "content_images": [],
-        "is_assignment": False,
-        "points_possible": None,
-        "due_at": None,
-        "lock_at": None,
-        "unlock_at": None,
-        "personal_at": None,
-        "submitted_at": None,
-        "boundary": None,
-        "source_created_at": None,
-        "source_modified_at": None,
-        "source_updated_at": None,
-        "source_published_at": None,
-        "author": None,
-        "author_email": None,
-        "author_profile_url": None,
-        "author_avatar_url": None,
-        "feedback_created_at": None,
-        "feedback_edited_at": None,
-        "media_kind": None,
-        "media_name": None,
-        "attachments": [],
-        "changes": {},
         "rule_text": "同轮课程更新合并，逐项保留完整内容与关联变化" if course_batch else "按配置合并摘要",
     }

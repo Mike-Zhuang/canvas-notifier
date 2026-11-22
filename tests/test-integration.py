@@ -235,7 +235,6 @@ async def test_successful_iam_recovery_does_not_send_indirect_success_mail(setti
     async with sessions() as db, db.begin():
         db.add(Health(name="sync", status="iam_network_error", details={}))
         db.add(Health(name="auth", status="reauth_required", details={}))
-        db.add(Health(name="initial_digest", status="created", details={}))
 
     settings.canvas_auth_mode = "cookie"
 
@@ -254,5 +253,5 @@ async def test_successful_iam_recovery_does_not_send_indirect_success_mail(setti
     assert result["status"] == "ok"
     async with sessions() as db:
         assert not (await db.scalars(select(Delivery))).all()
-        assert (await db.get(Health, "auth")).status == "degraded"
+        assert (await db.get(Health, "auth")).status == "ok"
         assert (await db.get(Health, "sync")).status == "ok"

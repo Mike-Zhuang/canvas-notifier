@@ -13,7 +13,10 @@
 {% endif %}系统发现时间：{{ item.observed_display }}（{{ item.timezone }}）
 最近成功同步：{{ item.last_synced_display }}
 本次规则：{{ item.rule_text }}
+{% if item.source_note %}{{ item.source_note }}
+{% endif %}
 {% for a in item.attachments %}附件：{{ a.name }}（{{ a.size_display }}） {{ a.link }}
-{% endfor %}{{ item.link }}
+{% endfor %}{% if item.link %}{{ item.action_text }}：{{ item.link }}
+{% endif %}
 {% for record in item.related_items %}{{ render_item(record, true) }}{% endfor %}
 {% endmacro %}

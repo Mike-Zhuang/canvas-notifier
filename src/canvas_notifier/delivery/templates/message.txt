@@ -40,5 +40,6 @@ Canvas · {{ label }}
 最近成功同步：{{ last_synced_display }}
 邮件生成时间：{{ rendered_display }}
 本次规则：{{ rule_text }}
-系统发现时间不等于老师上传或修改时间。提交状态以最近同步为准。本服务不代表学校官方通知，回复本邮件不会发送给老师。
+{% if source_note %}{{ source_note }}
+{% endif %}本服务不代表学校官方通知，回复不会发给老师。
 管理提醒与收件设置：{{ manage_url }}

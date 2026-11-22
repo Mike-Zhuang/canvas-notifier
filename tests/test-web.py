@@ -1,9 +1,11 @@
+import html
+import json
 import re
 
 import httpx
 from sqlalchemy import func, select
 
-from canvas_notifier.db import Rule
+from canvas_notifier.db import Resource, Rule, Scope
 from canvas_notifier.web.app import create_app
 
 
@@ -125,7 +127,6 @@ async def test_custom_ten_character_admin_password(settings, sessions):
 async def test_overview_course_and_incomplete_filters(settings, sessions):
     from datetime import timedelta
 
-    from canvas_notifier.db import Resource
     from canvas_notifier.domain.time import now_utc
 
     now = now_utc()
@@ -135,7 +136,7 @@ async def test_overview_course_and_incomplete_filters(settings, sessions):
     later = (now + timedelta(days=2)).isoformat()
     submitted = {"submitted_at": past}
     cases = [
-        ("pending", "1", {}, {}, "online_upload"),
+        ("pending", "1", {"grade_hidden": True, "score": 99, "grade": "秘密成绩"}, {}, "online_upload"),
         ("submitted", "1", submitted, {}, "online_upload"),
         ("excused", "1", {"excused": True}, {}, "online_upload"),
         ("local", "1", {}, {"completed": True}, "on_paper"),
@@ -147,10 +148,24 @@ async def test_overview_course_and_incomplete_filters(settings, sessions):
         ("other", "2", {}, {}, "online_upload"),
         ("old", "3", {}, {}, "online_upload"),
         ("next_term", "4", {}, {}, "online_upload"),
-        ("unknown_term", "5", {}, {}, "online_upload"),
+        (
+            "unknown_term",
+            "5",
+            {"published_score": 0, "published_grade": "未通过", "score": 98},
+            {},
+            "online_upload",
+        ),
+        ("ended_unknown_term", "6", {}, {}, "online_upload"),
     ]
     async with sessions() as db, db.begin():
-        periods = [(past, future), (past, future), (earlier, past), (future, later), (None, None)]
+        periods = [
+            (past, future),
+            (past, future),
+            (earlier, past),
+            (future, later),
+            (None, None),
+            (None, None),
+        ]
         for index, (start, end) in enumerate(periods, 1):
             cid = str(index)
             db.add(
@@ -159,11 +174,17 @@ async def test_overview_course_and_incomplete_filters(settings, sessions):
                     kind="course",
                     external_id=cid,
                     scope="courses",
-                    data={"name": f"课程{cid}", "term": {"start_at": start, "end_at": end}},
+                    data={
+                        "name": f"课程{cid}",
+                        "term": {"start_at": start, "end_at": end},
+                        **({"workflow_state": "completed"} if cid == "6" else {}),
+                    },
                 )
             )
         for name, cid, sub, local, submission_type in cases:
             data = {"name": name, "submission_types": [submission_type]}
+            if name == "unknown_term":
+                data["points_possible"] = 10
             if name == "overdue":
                 data.update(due_at=past, lock_at=future)
             if name == "closed":
@@ -202,7 +223,10 @@ async def test_overview_course_and_incomplete_filters(settings, sessions):
     ) as client:
         await sign_in(client)
         default = await client.get("/")
-        assert task_names(default) == {"pending", "redo", "missing", "external", "other"}
+        assert task_names(default) == {"pending", "redo", "missing", "external", "other", "unknown_term"}
+        assert "学期未定" in default.text
+        assert "<b>成绩</b> 0 / 10 · 未通过" in default.text
+        assert "秘密成绩" not in default.text and "<b>成绩</b> 98" not in default.text
         assert "需要重新提交" in default.text
         assert task_names(await client.get("/?course=2")) == {"other"}
         assert task_names(await client.get("/?course=1&status=all&q=submitted")) == {"submitted"}
@@ -227,3 +251,100 @@ async def test_overview_course_and_incomplete_filters(settings, sessions):
         assert task_names(empty) == set()
         assert "目前没有匹配的任务" in empty.text
         assert task_names(await client.get("/?status=invalid")) == task_names(default)
+
+
+async def test_health_separates_unsupported_from_sync_coverage(settings, sessions):
+    async with sessions() as db, db.begin():
+        db.add_all(
+            [
+                Scope(key="course::", kind="course", status="ok", complete=True),
+                Scope(key="page:1:", kind="page", course_id="1", status="unsupported"),
+            ]
+        )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app(settings, sessions)), base_url="http://127.0.0.1:8000"
+    ) as client:
+        await sign_in(client)
+        page = await client.get("/health")
+        assert page.status_code == 200
+        assert "未开放的功能" in page.text and "此课程未开放该功能" in page.text
+        assert "1/1</strong> 同步范围正常" in (await client.get("/")).text
+
+
+async def test_child_rules_save_only_overrides(settings, sessions):
+    async with sessions() as db, db.begin():
+        db.add_all(
+            [
+                Resource(
+                    key="course::1", kind="course", external_id="1", scope="course::", data={"name": "课程"}
+                ),
+                Resource(
+                    key="assignment:1:2",
+                    kind="assignment",
+                    external_id="2",
+                    course_id="1",
+                    scope="assignment:1:",
+                    data={"name": "任务"},
+                ),
+                Rule(
+                    scope="global",
+                    data={"recipients": ["owner@example.test"], "events": {"grade_changed": "off"}},
+                ),
+            ]
+        )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app(settings, sessions)), base_url="http://127.0.0.1:8000"
+    ) as client:
+        await sign_in(client)
+        page = await client.get("/rules?scope=course:1")
+        assert page.status_code == 200
+        csrf = re.search(r'name="csrf" value="([^"]+)"', page.text)[1]
+        assert 'id="inherited-config" rows="8" readonly' in page.text
+        assert "（继承）" in page.text and "owner@example.test" in page.text
+        advanced = re.search(r'<textarea id="config"[^>]*>(.*?)</textarea>', page.text, re.S)[1]
+        assert json.loads(html.unescape(advanced)) == {}
+        values = {
+            "csrf": csrf,
+            "scope": "course:1",
+            "due": "PT72H, P1D, PT6H, PT1H",
+            "lock": "P1D, PT2H",
+            "unlock": "",
+            "personal": "PT24H, PT1H",
+            "enabled": "on",
+            "only_incomplete": "on",
+            "timezone": "Asia/Shanghai",
+            "quiet_start": "23:00",
+            "quiet_end": "08:00",
+            "critical_policy": "allow_before_boundary",
+            "stale_source_policy": "send_with_last_synced_at",
+            "digest_hour": "18",
+            "overdue_max": "2",
+            "history_days": "120",
+            "default_event": "immediate",
+        }
+        assert (await client.post("/rules", data=values)).status_code == 303
+        async with sessions() as db:
+            assert not await db.get(Rule, "course:1")
+        values["pinned"] = "on"
+        assert (await client.post("/rules", data=values)).status_code == 303
+        async with sessions() as db:
+            assert (await db.get(Rule, "course:1")).data == {"pinned": True}
+        task = {
+            "csrf": csrf,
+            "scope": "assignment:1:2",
+            "mode": "json",
+            "config": json.dumps(
+                {
+                    "pinned": True,
+                    "recipients": ["owner@example.test"],
+                    "events": {"grade_changed": "off", "file_created": "digest"},
+                }
+            ),
+        }
+        assert (await client.post("/rules", data=task)).status_code == 303
+        async with sessions() as db:
+            assert (await db.get(Rule, "assignment:1:2")).data == {"events": {"file_created": "digest"}}
+        task["config"] = '{"recipients":["other@example.test"]}'
+        assert (await client.post("/rules", data=task)).status_code == 303
+        async with sessions() as db:
+            assert (await db.get(Rule, "assignment:1:2")).data == {"recipients": ["other@example.test"]}

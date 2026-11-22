@@ -124,3 +124,15 @@ async def test_credential_identity_mismatch_is_blocked(settings, sessions):
     async with CanvasClient(settings, httpx.MockTransport(handler)) as client:
         with pytest.raises(CanvasError, match="credential_identity_mismatch"):
             await bind_identity(sessions, client)
+
+
+async def test_page_listing_unavailable_result(settings):
+    def handler(request):
+        if request.url.path.endswith("/pages"):
+            return httpx.Response(404, json={})
+        return httpx.Response(200, json=[])
+
+    async with CanvasClient(settings, httpx.MockTransport(handler)) as client:
+        results = {(kind, suffix): result async for kind, suffix, result in content_scopes(client, "1")}
+    page = results["page", ""]
+    assert not page.complete and page.error == "resource_unavailable" and not page.items

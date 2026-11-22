@@ -54,3 +54,34 @@ async def test_unsent_alert_cancelled_without_recovery_email(settings, sessions)
     async with sessions() as db:
         notices = (await db.scalars(select(Delivery))).all()
         assert len(notices) == 1 and notices[0].status == "cancelled"
+
+
+async def test_owner_auth_alerts_immediately_and_only_once(settings, sessions):
+    for seconds in (0, 1):
+        assert (
+            await step(
+                sessions,
+                settings,
+                seconds,
+                [{"scope": "authentication_or_sync", "status": "iam_interaction_required"}],
+            )
+            > 0
+        )
+    async with sessions() as db:
+        notices = (await db.scalars(select(Delivery))).all()
+        assert len(notices) == 1 and notices[0].payload["kind"] == "sync_interrupted"
+
+
+async def test_immediate_thresholds_exclude_unsupported(settings, sessions):
+    settings = settings.model_copy(update={"sync_alert_failures": 1, "sync_alert_seconds": 0})
+    from canvas_notifier.config import Settings
+
+    assert Settings(_env_file=None, sync_alert_failures=1, sync_alert_seconds=0).sync_alert_seconds == 0
+    assert (
+        await step(sessions, settings, 0, [{"scope": "page:1:", "status": "unsupported"}])
+        == settings.poll_seconds
+    )
+    await step(sessions, settings, 1, ERROR)
+    async with sessions() as db:
+        notices = (await db.scalars(select(Delivery))).all()
+        assert len(notices) == 1 and notices[0].payload["kind"] == "sync_interrupted"

@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     canvas_cookie_fallback: bool = False
     canvas_cookie_resources: str = ""
     iam_auto_login: bool = False
-    iam_use_saved_session: bool = False
+    iam_use_saved_session: bool = True
     iam_cookie_file: Path = Path("secrets/iam-cookies.json")
     iam_username_file: Path = Path("secrets/iam-username")
     iam_password_file: Path = Path("secrets/iam-password")
@@ -35,14 +35,14 @@ class Settings(BaseSettings):
     mail_to: str = ""
     mail_test_to: str = ""
     display_timezone: str = "Asia/Shanghai"
-    sync_alert_failures: int = Field(default=3, ge=2)
-    sync_alert_seconds: int = Field(default=300, ge=60)
+    sync_alert_failures: int = Field(default=3, ge=1)
+    sync_alert_seconds: int = Field(default=300, ge=0)
     sync_recovery_successes: int = Field(default=2, ge=1)
     poll_seconds: int = 300
     content_poll_seconds: int = 900
     historical_poll_seconds: int = 3600
     request_interval: float = 0.2
-    max_pages: int = 1000
+    max_pages: int = Field(default=1000, ge=1)
 
     @field_validator("canvas_base_url")
     @classmethod

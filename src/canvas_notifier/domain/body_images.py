@@ -18,6 +18,16 @@ class BodyImages(HTMLParser):
             self.parts.append(self.get_starttag_text())
             return
         values = dict(attrs)
+        image = self._canvas_image(values)
+        if image is None:
+            self.parts.append(html.escape(values.get("alt") or "[图片]"))
+            return
+        self.images.append(image)
+        self.parts.append(
+            f'<a href="{html.escape(image["url"], quote=True)}">图片：{html.escape(image["name"])}</a>'
+        )
+
+    def _canvas_image(self, values):
         source = values.get("data-api-endpoint") or values.get("src") or ""
         try:
             parsed, base = urlsplit(urljoin(self.origin + "/", html.unescape(source))), urlsplit(self.origin)
@@ -26,21 +36,17 @@ class BodyImages(HTMLParser):
                 or parsed.username
                 or parsed.password
             ):
-                return
+                return None
             match = re.fullmatch(
                 r"/(?:api/v1/)?(?:courses/(\d+)/)?files/(\d+)(?:/(?:preview|download))?", parsed.path
             )
             if not match:
-                return
+                return None
         except ValueError:
-            return
+            return None
         course_id, file_id = match.groups()
         path = f"/courses/{course_id}/files/{file_id}" if course_id else f"/files/{file_id}"
-        image = {"file_id": file_id, "url": self.origin + path, "name": values.get("alt") or "题目图片"}
-        self.images.append(image)
-        self.parts.append(
-            f'<a href="{html.escape(image["url"], quote=True)}">图片：{html.escape(image["name"])}</a>'
-        )
+        return {"file_id": file_id, "url": self.origin + path, "name": values.get("alt") or "题目图片"}
 
     def handle_startendtag(self, tag, attrs):
         if tag == "img":

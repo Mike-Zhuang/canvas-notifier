@@ -9,8 +9,8 @@
 1. 验证 Bearer Token 和已配置的 Canvas Cookie。
 2. 任一通道仍可用时沿用它，不提交 IAM 密码。
 3. 两者明确失效或未配置，且启用 `IAM_AUTO_LOGIN` 时，获取数据库登录租约。
-4. 默认创建全新 IAM 会话，不带旧 IAM Cookie；仅显式开启 `IAM_USE_SAVED_SESSION=true` 时尝试已有 SSO 会话。
-5. 出现正常密码表单时，获取本轮参数和公钥，提交授权保存的账号密码。
+4. 默认优先尝试已保存的 IAM SSO 会话；设置 `IAM_USE_SAVED_SESSION=false` 可禁用复用。
+5. 只有走到正常密码表单时才读取已授权保存的账号密码。有效的 SSO 会话不需要密码文件。
 6. 校验 OAuth state、Canvas 本人 API 和已绑定账号，然后原子替换 Canvas / IAM Cookie 文件。
 
 网络故障、429、5xx、403 不能当作凭据过期而反复登录。未知页面结构、未知目标域名、密码拒绝、验证码或增强认证会中止自动流程，不猜测下一步。
@@ -46,6 +46,7 @@ Canvas /login/openid_connect
 
 ```dotenv
 IAM_AUTO_LOGIN=true
+IAM_USE_SAVED_SESSION=true
 IAM_USERNAME_FILE=secrets/iam-username
 IAM_PASSWORD_FILE=secrets/iam-password
 IAM_COOKIE_FILE=secrets/iam-cookies.json
@@ -55,7 +56,7 @@ CANVAS_COOKIE_FALLBACK=true
 # 保持此前已经验证过的资源白名单，必须包含 identity
 ```
 
-账号密码只放在上述私密文件中，文件权限 600；配置示例不填真实值。首次连接和增强认证由本人在学校网页中完成：
+如果需要无有效 SSO 会话时的密码回退，再配置上述账号密码文件，权限 600。首次连接和增强认证由本人在学校网页中完成：
 
 ```sh
 uv run canvas-notifier auth login --remember-iam
@@ -81,7 +82,7 @@ uv run canvas-notifier auth iam-test --force
 - 密码拒绝或增强认证：停止重复提交。更新授权凭据文件、完成 `auth login --remember-iam` 或明确执行测试命令后才重新尝试。
 - 跨进程数据库租约防止同时登录；登录开始前保存冷却状态，进程中断不会立刻造成重试风暴。
 - 新 Cookie 只有通过普通 Canvas API 的再次校验后才替换旧文件；账号不一致或验证失败保留旧凭据与数据库。
-- 恢复成功和需要处理时产生状态变化通知，重复的相同阻塞不会每轮发送邮件。
+- 需要本人处理的认证阻塞从第一次发生就进入统一的同步故障告警，同一事件不重复发信。
 
 ## 验收与边界
 
@@ -89,4 +90,4 @@ uv run canvas-notifier auth iam-test --force
 
 无有效 IAM 会话时会尝试密码流程；学校若要求短信增强认证、验证码或其他验证，自动流程停止并通知本人，不承诺永久免交互。服务器出口和设备环境变化需部署时重新验证。
 
-自动登录成功仅更新健康状态和凭据文件，不发送 IAM 成功邮件，也不因同轮恢复发送认证降级或同步恢复邮件。IAM 登录失败统一经过同步持续故障窗口后告警；课程内容变化和真实采集失败的通知不受影响。
+自动登录成功仅更新健康状态和凭据文件，不发送 IAM 成功邮件。Cookie 通道正常时，认证标记为正常，即使 Token 已失效。临时 IAM 故障仍按同步告警窗口判定；课程内容通知不受影响。

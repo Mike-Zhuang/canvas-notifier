@@ -12,6 +12,7 @@ from canvas_notifier.sync.leases import lease
 
 REAUTH_ERRORS = {"auth_rejected", "login_html_returned", "bearer_missing", "cookie_missing"}
 BLOCKED_ERRORS = {
+    "iam_credentials_missing",
     "iam_rejected",
     "iam_interaction_required",
     "iam_schema_changed",
@@ -41,9 +42,6 @@ async def recover_session(sessions, client, *, force=False, login_factory=IAMLog
         settings.canvas_cookie_fallback and "identity" in settings.canvas_cookie_resources.split(",")
     ):
         raise CanvasError("iam_cookie_fallback_not_enabled")
-    username, password = read_secret(settings.iam_username_file), read_secret(settings.iam_password_file)
-    if not username or not password:
-        raise CanvasError("iam_credentials_missing")
     async with lease(sessions, "iam-login", seconds=settings.iam_timeout_seconds + 30) as acquired:
         if not acquired:
             raise CanvasError("iam_login_in_progress")
@@ -92,7 +90,7 @@ async def recover_session(sessions, client, *, force=False, login_factory=IAMLog
                 session.add(state)
             state.status, state.details, state.updated_at = "attempting", details, now
         try:
-            result = await login_factory(settings).login(username, password)
+            result = await login_factory(settings).login()
             if expected is not None and result.user_id != expected:
                 raise CanvasError("iam_identity_mismatch")
             # 再用普通 Canvas 客户端验证待保存 Cookie，不能只信任登录回调。

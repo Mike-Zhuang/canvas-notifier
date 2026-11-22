@@ -105,6 +105,31 @@ async def effective_rules(session, course_id="", resource_key="") -> tuple[Rules
     return Rules.model_validate(data), sources
 
 
+def child_overrides(parent: Rules, raw: dict) -> dict:
+    # 先按父级补齐并验证，再比较规范值（例如 P1D 与 PT24H 实际相同）。
+    inherited = Rules.model_validate(parent.model_dump()).model_dump()
+    candidate = {**inherited, **raw}
+    if isinstance(raw.get("events"), dict):
+        candidate["events"] = {**parent.events, **raw["events"]}
+    normalized = Rules.model_validate(candidate).model_dump()
+    overrides = {
+        name: normalized[name]
+        for name in raw
+        if name not in ("events", "overdue_repeat") and normalized[name] != inherited[name]
+    }
+    if "overdue_repeat" in raw and duration(normalized["overdue_repeat"]) != duration(
+        inherited["overdue_repeat"]
+    ):
+        overrides["overdue_repeat"] = normalized["overdue_repeat"]
+    if "events" in raw:
+        event_overrides = {
+            name: mode for name, mode in normalized["events"].items() if mode != parent.events.get(name)
+        }
+        if event_overrides:
+            overrides["events"] = event_overrides
+    return overrides
+
+
 def quiet_adjust(trigger, boundary, rule: Rules):
     if not rule.quiet_enabled:
         return trigger

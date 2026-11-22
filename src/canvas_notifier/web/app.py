@@ -20,10 +20,10 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from canvas_notifier.config import Settings, read_secret
 from canvas_notifier.db import Delivery, Event, Health, Reminder, Resource, Rule, Scope, SyncRun, database
 from canvas_notifier.delivery.queue import LABELS
-from canvas_notifier.domain.normalize import complete
+from canvas_notifier.domain.normalize import GradeVisibilityPolicy, complete
 from canvas_notifier.domain.time import now_utc, parse_time
 from canvas_notifier.scheduling.planner import rebuild
-from canvas_notifier.scheduling.rules import Rules, duration, effective_rules
+from canvas_notifier.scheduling.rules import Rules, child_overrides, duration, effective_rules
 
 ROOT = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=ROOT / "templates")
@@ -199,13 +199,24 @@ def create_app(settings=None, sessions=None):
         rows = []
         now = now_utc()
         current_courses = set()
-        if term == "current":
-            for cid, resource in courses.items():
-                period = resource.data.get("term") or {}
-                start = parse_time(period.get("start_at"))
-                end = parse_time(period.get("end_at"))
-                if start is not None and end is not None and start <= now < end:
+        unknown_terms = set()
+        for cid, resource in courses.items():
+            period = resource.data.get("term") or {}
+            start, end = parse_time(period.get("start_at")), parse_time(period.get("end_at"))
+            if start and end:
+                if start <= now < end:
                     current_courses.add(cid)
+                continue
+            unknown_terms.add(cid)
+            course_start = parse_time(resource.data.get("start_at"))
+            course_end = parse_time(resource.data.get("end_at"))
+            if (
+                resource.availability == "visible"
+                and resource.data.get("workflow_state") not in {"completed", "deleted", "unpublished"}
+                and all(not date or date <= now for date in (start, course_start))
+                and all(not date or now < date for date in (end, course_end))
+            ):
+                current_courses.add(cid)
         for task in tasks:
             if course and task.course_id != course:
                 continue
@@ -236,6 +247,8 @@ def create_app(settings=None, sessions=None):
                     "task": task,
                     "course": courses.get(task.course_id),
                     "submission": submission,
+                    "unknown_term": task.course_id in unknown_terms,
+                    "grade": GradeVisibilityPolicy.visible(submission.data) if submission else None,
                     "done": done,
                     "has_time": bool(times),
                     "next_time": min(upcoming)
@@ -263,7 +276,7 @@ def create_app(settings=None, sessions=None):
                 status=status,
                 term=term,
                 healthy=sum(s.status == "ok" for s in scopes),
-                total=len(scopes),
+                total=sum(s.status != "unsupported" for s in scopes),
             ),
         )
 
@@ -279,6 +292,11 @@ def create_app(settings=None, sessions=None):
             effective, sources = await effective_rules(
                 session, course_id, scope if scope.startswith("assignment:") else ""
             )
+            inherited = None
+            if scope != "global":
+                inherited, _ = await effective_rules(
+                    session, course_id if scope.startswith("assignment:") else ""
+                )
             reminders = list(
                 (
                     await session.scalars(
@@ -328,7 +346,14 @@ def create_app(settings=None, sessions=None):
                 resource=resource,
                 saved=saved,
                 error="",
-                advanced=json.dumps(effective.model_dump(), ensure_ascii=False, indent=2),
+                advanced=json.dumps(
+                    (row.data if row else {}) if inherited else effective.model_dump(),
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                inherited=json.dumps(inherited.model_dump(), ensure_ascii=False, indent=2)
+                if inherited
+                else "",
             ),
         )
 
@@ -337,17 +362,34 @@ def create_app(settings=None, sessions=None):
         form = await form_data(request)
         scope = str(form.get("scope", "global"))
         async with sessions() as session, session.begin():
+            parent = None
             if scope != "global":
                 target = await session.get(
                     Resource, "course::" + scope.split(":", 1)[1] if scope.startswith("course:") else scope
                 )
-                if not target:
+                expected_kind = "course" if scope.startswith("course:") else "assignment"
+                if not target or target.kind != expected_kind:
                     raise HTTPException(400, "规则目标不存在")
+                parent, _ = await effective_rules(
+                    session, target.course_id if expected_kind == "assignment" else ""
+                )
+            old = await session.get(Rule, scope)
+            if form.get("reset") == "true" and parent:
+                if old:
+                    await session.delete(old)
+                await session.flush()
+                await rebuild(session)
+                return RedirectResponse("/rules?scope=" + scope + "&saved=1", 303)
             try:
                 if form.get("mode") == "json":
                     raw = json.loads(str(form.get("config", "{}")))
-                    validated = Rules.model_validate(raw)
-                    data = validated.model_dump(exclude_unset=True)
+                    if not isinstance(raw, dict):
+                        raise ValueError("Expected a rule object")
+                    data = (
+                        child_overrides(parent, raw)
+                        if parent
+                        else Rules.model_validate(raw).model_dump(exclude_unset=True)
+                    )
                 else:
                     raw = {
                         key: [v.strip() for v in str(form.get(key, "")).split(",") if v.strip()]
@@ -381,12 +423,13 @@ def create_app(settings=None, sessions=None):
                         {key: int(str(form[key])) for key in ("digest_hour", "overdue_max", "history_days")}
                     )
                     raw["default_event"] = str(form["default_event"])
-                    data = Rules.model_validate(raw).model_dump(exclude_unset=True)
-                    old = await session.get(Rule, scope)
-                    data = {**(old.data if old else {}), **data}
-                # 清空覆盖显式恢复继承，不能用默认值伪装继承。
-                old = await session.get(Rule, scope)
-                if form.get("reset") == "true" and scope != "global":
+                    existing = old.data if old else {}
+                    data = (
+                        child_overrides(parent, {**existing, **raw})
+                        if parent
+                        else {**existing, **Rules.model_validate(raw).model_dump(exclude_unset=True)}
+                    )
+                if parent and not data:
                     if old:
                         await session.delete(old)
                 elif old:
@@ -497,7 +540,8 @@ def create_app(settings=None, sessions=None):
             context=await base_context(
                 request,
                 "health",
-                scopes=scopes,
+                scopes=[s for s in scopes if s.status != "unsupported"],
+                unsupported=[s for s in scopes if s.status == "unsupported"],
                 health=health,
                 runs=runs,
                 courses=courses,

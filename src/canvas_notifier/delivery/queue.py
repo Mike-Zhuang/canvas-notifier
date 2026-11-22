@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from canvas_notifier.db import Delivery, Resource
 from canvas_notifier.delivery.presentation import resource_link
-from canvas_notifier.domain.normalize import fingerprint
+from canvas_notifier.domain.normalize import GradeVisibilityPolicy, fingerprint
 from canvas_notifier.domain.time import now_utc
 from canvas_notifier.scheduling.rules import digest_time, effective_rules, quiet_adjust
 
@@ -15,12 +15,15 @@ LABELS = {
     "assignment_dates_changed": "任务时间变化",
     "assignment_order_changed": "作业排序调整",
     "assignment_access_changed": "作业访问状态变化",
+    "assignment_unavailable": "作业已不可见",
+    "assignment_available_again": "作业重新可见",
     "grade_published": "成绩发布",
     "grade_changed": "成绩变化",
     "submission_comment_added": "新的教师反馈",
     "submission_comment_changed": "教师反馈更新",
     "rubric_changed": "评分量表更新",
     "submission_confirmed": "检测到在线提交",
+    "submission_status_changed": "提交状态变化",
     "resubmission_requested": "需要重新提交",
     "announcement_created": "新公告",
     "announcement_changed": "公告更新",
@@ -106,10 +109,19 @@ async def enqueue(
                 Resource.kind == "assignment", Resource.external_id == str(data.get("plannable_id"))
             )
         )
-    course_id = assignment.course_id if assignment else resource.course_id if resource else ""
+    course = resource if resource and resource.kind == "course" else None
+    course_id = (
+        assignment.course_id
+        if assignment
+        else course.external_id
+        if course
+        else resource.course_id
+        if resource
+        else ""
+    )
     if not course_id and resource:
         course_id = str(data.get("_email", {}).get("course_id") or "")
-    rule_key = assignment.key if assignment else resource.key if resource else ""
+    rule_key = assignment.key if assignment else resource.key if resource and not course else ""
     if resource and resource.kind == "submission" and assignment is None:
         rule_key = f"assignment:{course_id}:{data.get('assignment_id')}"
     rule, sources = await effective_rules(session, course_id, rule_key)
@@ -125,7 +137,8 @@ async def enqueue(
     )
     if not targets:
         return "no_recipient"
-    course = await session.get(Resource, f"course::{course_id}") if course_id else None
+    if course is None and course_id:
+        course = await session.get(Resource, f"course::{course_id}")
     title = (
         data.get("name")
         or data.get("title")
@@ -141,6 +154,8 @@ async def enqueue(
     link = resource_link(resource, settings.canvas_base_url) if resource else ""
     if assignment and (not link or resource.kind == "planner"):
         link = resource_link(assignment, settings.canvas_base_url)
+    if kind == "assignment_unavailable" and course_id.isdigit():
+        link = f"{settings.canvas_base_url}/courses/{course_id}"
     submission = resource if resource and resource.kind == "submission" else None
     if assignment and submission is None:
         submission = await session.get(
@@ -148,13 +163,24 @@ async def enqueue(
         )
     task_data = assignment.data if assignment else {}
     submission_data = submission.data if submission else {}
-    feedback = (changes or {}).get("comment", {})
+    visible_grade = GradeVisibilityPolicy.visible(submission_data) or {}
+    changes = changes or {}
     email_data = data.get("_email", {})
-    comment_data = email_data.get("comments", {}).get(str(feedback.get("id")), {})
-    attachments = [
-        *email_data.get("attachments", data.get("attachments", [])),
-        *comment_data.get("attachments", feedback.get("attachments", [])),
-    ]
+    event_data, event_body_key = {}, ""
+    if kind in ("submission_comment_added", "submission_comment_changed"):
+        event_data, event_body_key = changes.get("comment", {}), "comment"
+        body_data = email_data.get("comments", {}).get(str(event_data.get("id")), {})
+    elif kind == "conversation_message_added":
+        event_data, event_body_key = changes.get("message", {}), "body"
+        body_data = email_data.get("messages", {}).get(str(event_data.get("id")), {})
+    else:
+        body_data = email_data
+    comment_data = body_data if event_body_key == "comment" else {}
+    attachments = (
+        body_data.get("attachments", event_data.get("attachments", []))
+        if event_body_key
+        else email_data.get("attachments", data.get("attachments", []))
+    )
     attachments = [
         {
             "name": a.get("display_name") or "附件",
@@ -196,7 +222,7 @@ async def enqueue(
         "canvas_origin": settings.canvas_base_url,
         "course_id": course_id,
         "label": LABELS.get(kind, kind.replace("_", " ")),
-        "title": re.sub(r"[\r\n]+", " ", title)[:200],
+        "title": re.sub(r"[\r\n]+", " ", title),
         "course": course.data.get("name", "") if course else "",
         "link": link,
         "observed_at": now.isoformat(),
@@ -210,17 +236,29 @@ async def enqueue(
         "excused": submission_data.get("excused", False),
         "redo_request": submission_data.get("redo_request", False),
         "points_possible": task_data.get("points_possible"),
-        "score": submission_data.get("score"),
-        "grade": submission_data.get("grade"),
+        "score": visible_grade.get("score"),
+        "grade": visible_grade.get("grade"),
+        "rubric": task_data.get("rubric", []),
+        "allowed_attempts": task_data.get("allowed_attempts"),
+        "lock_explanation": task_data.get("lock_explanation"),
         "late": submission_data.get("late", False),
         "missing": submission_data.get("missing", False),
+        "start_at": data.get("start_at") if resource and resource.kind == "calendar" else None,
+        "end_at": data.get("end_at") if resource and resource.kind == "calendar" else None,
+        "location_name": data.get("location_name") if resource and resource.kind == "calendar" else None,
+        "location_address": data.get("location_address")
+        if resource and resource.kind == "calendar"
+        else None,
+        "todo_date": data.get("todo_date") if resource and resource.kind == "planner_note" else None,
         "file_size": data.get("size") if resource and resource.kind == "file" else None,
         "filename": data.get("filename") if resource and resource.kind == "file" else None,
         "content_type": data.get("content-type") if resource and resource.kind == "file" else None,
         "folder_id": data.get("folder_id") if resource and resource.kind == "file" else None,
-        "author": comment_data.get("author_name") or feedback.get("author_name"),
+        "author": body_data.get("author_name") or event_data.get("author_name"),
         "resource_kind": resource.kind if resource else "",
-        "content_images": data.get("content_images", []),
+        "content_images": (
+            body_data.get("content_images", []) if event_body_key else data.get("content_images", [])
+        ),
         "source_created_at": email_data.get("source_created_at"),
         "source_modified_at": email_data.get("source_modified_at") or data.get("modified_at"),
         "source_updated_at": email_data.get("source_updated_at") or data.get("updated_at"),
@@ -243,16 +281,19 @@ async def enqueue(
         "boundary": boundary.isoformat() if boundary else None,
         "timezone": rule.timezone,
         "no_due": kind == "lock" and not data.get("due_at"),
-        "changes": changes or {},
+        "changes": changes,
         "sources": sources,
         "reminder_keys": reminder_keys or [],
-        "excerpt": comment_data.get("body")
-        or feedback.get("comment")
-        or email_data.get("body")
-        or data.get("message")
-        or data.get("description")
-        or data.get("body")
-        or "",
+        "excerpt": (
+            body_data.get("body", event_data.get(event_body_key)) or ""
+            if event_body_key
+            else email_data.get("body")
+            or data.get("message")
+            or data.get("description")
+            or data.get("body")
+            or data.get("details")
+            or ""
+        ),
         "manage_url": settings.public_base_url.rstrip("/") + "/rules",
     }
     available = (

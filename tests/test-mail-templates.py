@@ -82,18 +82,21 @@ def test_canvas_body_links_keep_path_without_signature():
     rendered = present(
         payload(
             excerpt=(
-                '<a href="/courses/1/files/3/download?verifier=secret">课件</a>'
-                '<a href="https://evil.test/x?token=secret">外站</a>'
+                '<a href="/courses/1/files/3/download?module_item_id=12&amp;verifier=secret#part-2">课件</a>'
+                '<a href="https://evil.test/x?X-Amz-Signature=secret">外站</a>'
             )
         )
     )
-    assert 'href="https://canvas.tongji.edu.cn/courses/1/files/3/download"' in rendered["excerpt"]
+    link = "https://canvas.tongji.edu.cn/courses/1/files/3/download?module_item_id=12#part-2"
+    assert f'href="{link}"' in rendered["excerpt"]
+    assert link in rendered["excerpt_text"]
     assert "secret" not in rendered["excerpt"] and "evil.test" not in rendered["excerpt"]
 
 
 def test_mail_html_drops_tracking_images_and_credential_links():
     html = clean_email_html(
-        '<script>x()</script><img src="https://evil.test/pixel"><a href="javascript:alert(1)">bad</a><a href="https://canvas.tongji.edu.cn/files/1?verifier=secret">private</a><a href="https://example.org/course">normal</a>'
+        '<script>x()</script><img src="https://evil.test/pixel"><a href="javascript:alert(1)">bad</a><a href="https://canvas.tongji.edu.cn/files/1?verifier=secret">private</a><a href="https://example.org/course">normal</a>',
+        "https://canvas.tongji.edu.cn",
     )
     assert "<script" not in html and "<img" not in html and "javascript:" not in html and "secret" not in html
     assert 'href="https://example.org/course"' in html

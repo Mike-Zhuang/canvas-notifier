@@ -238,3 +238,46 @@ async def test_source_timestamp_metadata_backfill_does_not_notify(sessions, sett
         assert row.version == version
         assert row.data["_email"]["source_created_at"]
         assert not (await db.scalars(select(Event))).all()
+
+
+async def test_404_page_scope_unsupported_until_successful(sessions, settings):
+    unavailable = PageResult(error="resource_unavailable")
+    async with sessions() as db, db.begin():
+        scope = await apply_scope(db, settings, "page", "1", unavailable, now=NOW)
+        assert not scope.baseline and not scope.complete
+        assert scope.status == "unsupported"
+        assert scope.next_attempt == NOW + timedelta(hours=24)
+
+        later = NOW + timedelta(hours=24)
+        scope = await apply_scope(db, settings, "page", "1", PageResult(pages=1, complete=True), now=later)
+        assert scope.baseline and scope.complete and scope.status == "ok"
+        scope = await apply_scope(db, settings, "page", "1", unavailable, now=later + timedelta(hours=1))
+        assert scope.baseline and not scope.complete and scope.status == "resource_unavailable"
+
+
+async def test_complete_resumed_assignment_scope_keeps_rows_from_earlier_pages(sessions, settings):
+    async with sessions() as db, db.begin():
+        await apply(db, settings, [assignment(), {**assignment(), "id": "3"}])
+        cursor = settings.canvas_base_url + "/api/v1/courses/1/assignments?page=2"
+        first_page = PageResult(
+            [assignment()], 1, cursor=cursor, error="page_budget", continues=True, scan_urls=["first-page"]
+        )
+        scan_start = NOW + timedelta(minutes=1)
+        scope = await apply_scope(db, settings, "assignment", "1", first_page, now=scan_start)
+        assert (
+            scope.cursor == cursor and scope.scan_started == scan_start and scope.scan_urls == ["first-page"]
+        )
+        await apply_scope(
+            db, settings, "assignment", "1", PageResult([assignment("detail")]), now=NOW, targeted=True
+        )
+        scope = await apply_scope(
+            db,
+            settings,
+            "assignment",
+            "1",
+            PageResult(pages=1, complete=True, resumed=True),
+            now=scan_start + timedelta(minutes=1),
+        )
+        assert scope.cursor is None and scope.scan_started is None and scope.scan_urls is None
+        assert (await db.get(Resource, "assignment:1:2")).availability == "visible"
+        assert (await db.get(Resource, "assignment:1:3")).availability == "missing_unconfirmed"

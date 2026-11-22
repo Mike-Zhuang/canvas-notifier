@@ -29,9 +29,8 @@ def render_message(settings, delivery, *, payload=None, inline_images=None):
     embedded = embed_images(p, inline_images or {})
     message = EmailMessage()
     subject_parts = [value for value in (p.get("course"), p["title"]) if value]
-    message["Subject"] = (
-        f"[Canvas·{p['label']}] " + "｜".join(subject_parts).replace("\r", " ").replace("\n", " ")[:220]
-    )
+    subject = f"[Canvas·{p['label']}] " + "｜".join(subject_parts)
+    message["Subject"] = subject.replace("\r", " ").replace("\n", " ")[:220]
     message["From"], message["To"] = settings.mail_from, delivery.recipient
     message["Message-ID"], message["Date"] = delivery.message_id, format_datetime(now_utc())
     message.set_content(ENV.get_template("message.txt").render(**p))
@@ -70,7 +69,7 @@ async def applicable(session, delivery, now):
         from canvas_notifier.scheduling.rules import effective_rules
 
         resource = await session.get(Resource, delivery.resource_key) if delivery.resource_key else None
-        key = resource.key if resource else ""
+        key = resource.key if resource and resource.kind != "course" else ""
         if resource and resource.kind == "submission":
             key = f"assignment:{resource.course_id}:{resource.data.get('assignment_id')}"
         if (

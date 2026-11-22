@@ -202,7 +202,7 @@ class SuccessfulLogin:
     def __init__(self, settings):
         pass
 
-    async def login(self, username, password):
+    async def login(self):
         type(self).count += 1
         await asyncio.sleep(0.01)
         return LoginResult(
@@ -254,7 +254,7 @@ async def test_persistent_block_or_cooldown(recovery_settings, sessions, code):
         def __init__(self, settings):
             pass
 
-        async def login(self, username, password):
+        async def login(self):
             FailedLogin.count += 1
             raise CanvasError(code)
 
@@ -277,7 +277,7 @@ async def test_bind_recovers_only_when_both_auth_channels_failed(
 
     calls = []
 
-    async def login(self, username, password):
+    async def login(self):
         calls.append(1)
         return LoginResult(
             "42",
@@ -405,7 +405,7 @@ async def test_password_only_recovery_can_fetch_resources_without_bearer_file(
     recovery_settings.canvas_token_file.unlink()
     calls = []
 
-    async def login(self, username, password):
+    async def login(self):
         calls.append("iam-login")
         return LoginResult(
             "42",
@@ -446,7 +446,33 @@ async def test_new_auth_failure_after_success_is_not_throttled(recovery_settings
     assert SuccessfulLogin.count == 2
 
 
+async def test_recovery_uses_saved_session_without_password_files(settings, sessions):
+    settings.canvas_auth_mode = "cookie"
+    settings.iam_auto_login = True
+    write_secret(
+        settings.iam_cookie_file,
+        json.dumps([{"name": "iam-sso", "value": "accepted", "domain": "iam.tongji.edu.cn"}]),
+    )
+    school = School()
+    async with CanvasClient(settings, httpx.MockTransport(canvas_response)) as client:
+        identity = await recover_session(
+            sessions, client, login_factory=lambda cfg: IAMLogin(cfg, httpx.MockTransport(school))
+        )
+        assert identity == "42" and client.cookie_verified
+    assert school.password_posts == 0
+    assert not settings.iam_username_file.exists() and not settings.iam_password_file.exists()
+
+
+async def test_iam_password_form_checks_credentials_without_submitting(settings):
+    school = School()
+    with pytest.raises(CanvasError, match="iam_credentials_missing"):
+        await IAMLogin(settings, httpx.MockTransport(school)).login()
+    assert school.password_posts == 0
+    assert all(method == "GET" for method, _, _ in school.calls)
+
+
 async def test_fresh_password_login_ignores_invalid_saved_iam_file(settings):
+    settings.iam_use_saved_session = False
     write_secret(settings.iam_cookie_file, "invalid-old-cookie-file")
     school = School()
     result = await IAMLogin(settings, httpx.MockTransport(school)).login(

@@ -1,3 +1,5 @@
+import re
+from html import unescape
 from zoneinfo import ZoneInfo
 
 import bleach
@@ -9,6 +11,7 @@ NAMES = {
     "lock_at": "停止提交",
     "unlock_at": "开放时间",
     "submitted_at": "提交时间",
+    "last_seen": "最后一次看到作业",
     "name": "名称",
     "title": "标题",
     "description": "任务说明",
@@ -21,11 +24,18 @@ NAMES = {
     "workflow_state": "状态",
     "points_possible": "满分",
     "rubric_assessment": "评分量表",
+    "rubric": "评分标准",
+    "links": "正文链接",
+    "attachments": "附件",
+    "long_description": "详细说明",
+    "ratings": "评级选项",
+    "points": "分值",
     "coalesced_count": "合并的提醒点",
     "status": "状态",
     "scope": "受影响范围",
     "position": "列表排序位置（不是题目行号）",
     "locked_for_user": "对你锁定访问",
+    "lock_explanation": "锁定说明",
     "locked": "已锁定",
     "hidden": "已隐藏",
     "hidden_for_user": "对你隐藏",
@@ -45,14 +55,16 @@ NAMES = {
     "updated_at": "更新时间",
     "created_at": "创建时间",
     "submission_types": "允许的提交方式",
+    "allowed_attempts": "允许尝试次数",
     "submissions": "提交记录状态",
     "submitted": "已提交",
-    "excused": "已豁免",
+    "excused": "豁免",
     "graded": "已评分",
     "graded_at": "评分时间",
     "posted_at": "发布时间",
     "late": "迟交",
     "missing": "缺交",
+    "points_deducted": "扣分",
     "needs_grading": "等待评分",
     "has_feedback": "有反馈",
     "redo_request": "要求重新提交",
@@ -66,6 +78,7 @@ NAMES = {
     "all_day": "全天日程",
     "all_day_date": "全天日程日期",
     "location_name": "地点",
+    "location_address": "地点地址",
     "context_code": "所属课程或用户",
     "context_type": "所属范围类型",
     "course_code": "课程编号",
@@ -78,7 +91,7 @@ NAMES = {
     "plannable_id": "计划事项编号",
     "plannable_type": "计划事项类型",
     "plannable_date": "计划时间",
-    "todo_date": "待办时间",
+    "todo_date": "待办日期",
     "details": "详细说明",
     "is_quiz_assignment": "测验作业",
     "quiz_id": "测验编号",
@@ -147,6 +160,7 @@ VALUES = {
     "Course": "课程",
     "ok": "正常",
     "partial": "部分资源不可用",
+    "missing_unconfirmed": "暂未在作业列表中找到",
 }
 
 
@@ -168,10 +182,52 @@ def readable(value, timezone):
             pass
         text = bleach.clean(value, tags=set(), strip=True)
         return VALUES.get(text, NAMES.get(text, text))
+    if isinstance(value, float):
+        return str(value).removesuffix(".0")
     return str(value)
 
 
-def format_changes(changes, timezone):
+def _body_text(value):
+    if value is None:
+        return "未设置"
+    # 先保留段落和换行，再去除所有标签，避免前后版本被拼成一长行。
+    value = re.sub(r"</(?:p|div|li|blockquote|pre|tr|h[1-6])\s*>|<br\s*/?>", "\n", value, flags=re.I)
+    return unescape(bleach.clean(value, tags=set(), strip=True)).strip() or "（空）"
+
+
+def _rubric_assessment(value, criteria, timezone):
+    if not value:
+        return "未评分"
+    lines = []
+    for index, (criterion_id, assessment) in enumerate(value.items(), start=1):
+        criterion = criteria.get(str(criterion_id), {})
+        title = criterion.get("description") or criterion.get("long_description") or f"评分项 {index}"
+        parts = []
+        points = assessment.get("points")
+        if points is not None:
+            total = criterion.get("points")
+            points_text = readable(points, timezone)
+            if total is not None:
+                points_text += " / " + readable(total, timezone)
+            parts.append(points_text + " 分")
+        rating_id = str(assessment.get("rating_id") or "")
+        rating = next(
+            (
+                rating.get("description")
+                for rating in criterion.get("ratings", [])
+                if str(rating["id"]) == rating_id
+            ),
+            None,
+        )
+        if rating:
+            parts.append(_body_text(rating))
+        if assessment.get("comments"):
+            parts.append(_body_text(assessment["comments"]))
+        lines.append(_body_text(title) + "：" + "；".join(parts or ["未提供详细评分"]))
+    return "\n".join(lines)
+
+
+def format_changes(changes, timezone, *, rubric=()):
     lines = []
     for key, value in changes.items():
         if key in ("items", "future_tasks") and isinstance(value, list):
@@ -182,12 +238,27 @@ def format_changes(changes, timezone):
                         lines.append(f"  {NAMES[field]}：{readable(item[field], timezone)}")
                 if item.get("link"):
                     lines.append(item["link"])
-        elif key in ("comment", "message") and isinstance(value, dict):
-            lines.append(readable(value.get("comment") or value.get("body") or "", timezone))
         elif isinstance(value, dict) and set(value) == {"before", "after"}:
-            lines.append(
-                f"{NAMES.get(key, key)}：{readable(value['before'], timezone)} → {readable(value['after'], timezone)}"
+            label = NAMES.get(key, key)
+            if key in ("message", "body", "description", "details"):
+                lines.append(
+                    f"{label}\n修改前：{_body_text(value['before'])}\n修改后：{_body_text(value['after'])}"
+                )
+                continue
+            if key == "rubric_assessment":
+                criteria = {str(criterion["id"]): criterion for criterion in rubric}
+                old = _rubric_assessment(value["before"], criteria, timezone)
+                new = _rubric_assessment(value["after"], criteria, timezone)
+                lines.append(f"{label}\n修改前：\n{old}\n修改后：\n{new}")
+                continue
+            old, new = (
+                "不限" if key == "allowed_attempts" and value[side] == -1 else readable(value[side], timezone)
+                for side in ("before", "after")
             )
+            lines.append(f"{label}：{old} → {new}")
+        elif key in ("comment", "message") and isinstance(value, dict):
+            if body := value.get("comment") or value.get("body"):
+                lines.append(_body_text(body))
         else:
             lines.append(f"{NAMES.get(key, key)}：{readable(value, timezone)}")
     return "\n".join(lines)

@@ -202,7 +202,7 @@ class IAMLogin:
             response = await self.request(client, "GET", urljoin(str(response.url), location))
         raise CanvasError("iam_redirect_limit")
 
-    async def login(self, username: str, password: str) -> LoginResult:
+    async def login(self, username: str | None = None, password: str | None = None) -> LoginResult:
         try:
             async with asyncio.timeout(self.settings.iam_timeout_seconds):
                 return await self.exchange(username, password)
@@ -227,7 +227,7 @@ class IAMLogin:
         )
 
     async def exchange(self, username, password):
-        # 默认用全新 IAM 会话走密码流程，避免旧 SSO 状态影响恢复；复用需显式开启。
+        # 已保存的 IAM 会话优先尝试 SSO；仅在密码页才读取本地密码。
         async with httpx.AsyncClient(
             timeout=20,
             follow_redirects=False,
@@ -260,6 +260,12 @@ class IAMLogin:
                 raise CanvasError("iam_login_page_missing")
             action, fields = parse_form(response.text, str(response.url))
             self.check_url(action, "POST")
+            if username is None:
+                username = read_secret(self.settings.iam_username_file)
+            if password is None:
+                password = read_secret(self.settings.iam_password_file)
+            if not username or not password:
+                raise CanvasError("iam_credentials_missing")
             headers = {"Origin": IAM, "Referer": str(response.url), "X-Requested-With": "XMLHttpRequest"}
             check = await self.request(
                 client,

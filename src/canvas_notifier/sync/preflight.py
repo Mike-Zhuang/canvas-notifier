@@ -2,11 +2,11 @@ from datetime import timedelta
 
 from sqlalchemy import select
 
-from canvas_notifier.canvas.http import CanvasClient, CanvasError, PageResult
+from canvas_notifier.canvas.http import CanvasError, PageResult
 from canvas_notifier.db import Reminder, Resource
 from canvas_notifier.domain.time import now_utc
 from canvas_notifier.scheduling.planner import plan_resource
-from canvas_notifier.sync.leases import lease
+from canvas_notifier.sync.leases import canvas_session, lease, remaining_seconds
 from canvas_notifier.sync.service import bind_identity
 from canvas_notifier.sync.state import apply_scope, health
 
@@ -38,7 +38,9 @@ async def refresh_due(settings, sessions):
     async with lease(sessions, "sync") as acquired:
         if not acquired:
             return
-        async with CanvasClient(settings) as client:
+        async with canvas_session(settings, sessions) as client:
+            if remaining_seconds(client.retry_at):
+                return
             try:
                 await bind_identity(sessions, client)
                 for resource in candidates:

@@ -158,7 +158,11 @@ def doctor():
 
 
 @app.command()
-def sync(once: bool = True, dry_run: bool = False):
+def sync(
+    once: bool = True,
+    dry_run: bool = False,
+    include_history: bool = typer.Option(False, help="这次同步也扫描已超过关注期限的历史课程。"),
+):
     """只读采集；dry-run 使用临时数据库，不改正式状态，不发送邮件。"""
 
     async def main():
@@ -168,13 +172,15 @@ def sync(once: bool = True, dry_run: bool = False):
                 engine, sessions = database("sqlite+aiosqlite:///" + directory + "/state.db")
                 await create_schema(engine)
                 try:
-                    result = await sync_once(settings.model_copy(update={"mail_to": ""}), sessions)
+                    result = await sync_once(
+                        settings.model_copy(update={"mail_to": ""}), sessions, include_history=include_history
+                    )
                 finally:
                     await engine.dispose()
         else:
             engine, sessions = database(settings.database_url)
             try:
-                result = await sync_once(settings, sessions)
+                result = await sync_once(settings, sessions, include_history=include_history)
             finally:
                 await engine.dispose()
         output({**result, "dry_run": dry_run})

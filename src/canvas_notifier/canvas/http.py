@@ -2,17 +2,19 @@
 
 import asyncio
 import json
+import math
 import random
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit
 
 import httpx
 
 from canvas_notifier.config import Settings, read_secret
+from canvas_notifier.domain.time import now_utc
 
 # GET 也可能有副作用，因此路径和参数必须一起检查，禁止任意 HAR 重放。
 PATHS = [
@@ -69,6 +71,18 @@ class CanvasError(Exception):
         super().__init__(code)
 
 
+def retry_after(value: str, now: datetime) -> float:
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(value)
+            seconds = (when.astimezone(UTC) - now).total_seconds() if when.tzinfo else 0
+        except (ValueError, TypeError, OverflowError):
+            return 0
+    return max(0, seconds) if math.isfinite(seconds) else 0
+
+
 @dataclass
 class PageResult:
     items: list[dict] = field(default_factory=list)
@@ -76,10 +90,14 @@ class PageResult:
     complete: bool = False
     cursor: str | None = None
     error: str | None = None
+    resumed: bool = False
+    continues: bool = False
+    scan_urls: list[str] = field(default_factory=list)
+    skipped: bool = False
 
 
 class CanvasClient:
-    def __init__(self, settings: Settings, transport=None):
+    def __init__(self, settings: Settings, transport=None, *, retry_at=None, remember_retry=None):
         self.settings = settings
         self.origin = settings.canvas_base_url
         self.client = httpx.AsyncClient(
@@ -90,6 +108,8 @@ class CanvasClient:
         self.health = {}
         self.rate = {}
         self.cache = {}
+        self.scopes = {}
+        self.retry_at, self.remember_retry = retry_at, remember_retry
         self.user_id: str | None = None
         self.cookie_verified = False
         self.token = read_secret(settings.canvas_token_file)
@@ -147,7 +167,12 @@ class CanvasClient:
             headers["Cookie"] = "; ".join(pairs)
         return headers
 
+    def check_retry_after(self):
+        if self.retry_at and self.retry_at > now_utc():
+            raise CanvasError("rate_limited")
+
     async def _get(self, url: str, mode: str):
+        self.check_retry_after()
         headers = self.headers(mode, url)
         cache_key = (mode, url)
         if cache_key in self.cache:
@@ -156,6 +181,7 @@ class CanvasClient:
                 headers["If-None-Match"] = etag
         for attempt in range(4):
             async with self.gate:
+                self.check_retry_after()
                 await asyncio.sleep(
                     max(0, self.settings.request_interval - (time.monotonic() - self.last_request))
                 )
@@ -170,27 +196,22 @@ class CanvasClient:
                 finally:
                     self.last_request = time.monotonic()
             if response is None or response.status_code == 429 or response.status_code >= 500:
-                if attempt == 3:
-                    raise CanvasError(
-                        "rate_limited"
-                        if response is not None and response.status_code == 429
-                        else "server_error"
+                status = response.status_code if response is not None else None
+                code = "rate_limited" if status == 429 else "server_error"
+                now = now_utc()
+                hint = retry_after(response.headers.get("Retry-After", ""), now) if status else 0
+                if hint > 120 or (hint and attempt == 3):
+                    # 长冷却交给下一轮；同一租约下的其他请求也必须立即停下。
+                    latest = datetime.max.replace(tzinfo=UTC)
+                    self.retry_at = (
+                        now + timedelta(seconds=hint) if hint < (latest - now).total_seconds() else latest
                     )
-                delay = 2**attempt + random.random()
-                if response is not None and response.headers.get("Retry-After"):
-                    raw = response.headers["Retry-After"]
-                    try:
-                        delay = max(delay, float(raw))
-                    except ValueError:
-                        try:
-                            delay = max(
-                                delay,
-                                (parsedate_to_datetime(raw) - datetime.now(timezone.utc)).total_seconds(),
-                            )
-                        except (ValueError, TypeError):
-                            pass
-                if delay > 120:
-                    raise CanvasError("rate_limited")
+                    if self.remember_retry:
+                        await self.remember_retry(self.retry_at)
+                    raise CanvasError("rate_limited", status)
+                if attempt == 3:
+                    raise CanvasError(code, status)
+                delay = max(2**attempt + random.random(), hint)
                 await asyncio.sleep(delay)
                 continue
             self.rate = {
@@ -222,7 +243,7 @@ class CanvasClient:
             next_url = response.links.get("next", {}).get("url")
             # 在返回结果前校验，绝不向恶意 next Link 发送凭据。
             if next_url:
-                next_url = self.safe_url(next_url)
+                next_url = self.safe_url(urljoin(url, next_url))
                 if urlsplit(next_url).path != urlsplit(url).path:
                     raise CanvasError("pagination_path_changed")
             self.cache[cache_key] = (response.headers.get("ETag"), data, next_url)
@@ -247,7 +268,6 @@ class CanvasClient:
         try:
             return await self._get(url, selected)
         except CanvasError as error:
-            allowed = set(self.settings.canvas_cookie_resources.split(","))
             if (
                 mode is None
                 and selected == "token"
@@ -278,25 +298,45 @@ class CanvasClient:
             raise CanvasError("invalid_identity")
         return str(data["id"])
 
-    async def paginate(self, path, params=None, *, kind="") -> PageResult:
+    async def paginate(self, path, params=None, *, kind="", scope_key="") -> PageResult:
+        scope = self.scopes.get(scope_key)
+        if scope and scope.status == "unsupported" and scope.next_attempt and scope.next_attempt > now_utc():
+            return PageResult(error="unsupported", skipped=True)
+        start = url = self.safe_url(path, params)
         result = PageResult()
-        url = self.safe_url(path, params)
-        seen = set()
+        if scope and scope.cursor and scope.scan_started:
+            try:
+                cursor = self.safe_url(scope.cursor)
+            except CanvasError:
+                cursor = ""
+            # 每次续读都重新过安全白名单，且只能继续同一个列表端点。
+            if cursor and urlsplit(cursor).path == urlsplit(start).path:
+                url = cursor
+                result.resumed = True
+                result.scan_urls = list(scope.scan_urls or [])
+        seen = set(result.scan_urls)
         while url:
             if url in seen:
-                result.error, result.cursor = "pagination_loop", url
+                result.error = "pagination_loop"
                 return result
             if result.pages >= self.settings.max_pages:
-                result.error, result.cursor = "page_budget", url
+                result.error, result.cursor, result.continues = "page_budget", url, True
                 return result
-            seen.add(url)
             try:
                 data, next_url = await self.get(url, kind=kind)
                 if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
                     raise CanvasError("schema_changed")
             except CanvasError as error:
-                result.error, result.cursor = error.code, url
+                result.error = error.code
+                if (result.resumed or result.pages) and error.code in (
+                    "rate_limited",
+                    "server_error",
+                    "network_error",
+                ):
+                    result.cursor, result.continues = url, True
                 return result
+            seen.add(url)
+            result.scan_urls.append(url)
             result.items.extend(data)
             result.pages += 1
             url = next_url

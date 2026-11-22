@@ -2,6 +2,7 @@ from datetime import timedelta
 
 from sqlalchemy import select
 
+from canvas_notifier.canvas.adapters import SubmissionPageResult
 from canvas_notifier.db import Event, Health, Resource, Scope
 from canvas_notifier.delivery.queue import enqueue
 from canvas_notifier.domain.normalize import changes_for, normalize
@@ -46,9 +47,21 @@ async def apply_scope(
     if not scope:
         scope = Scope(key=scope_key, kind=kind, course_id=course_id, baseline=False)
         session.add(scope)
+    resumed = not targeted and result.resumed and scope.scan_started is not None
     if not targeted:
         scope.last_attempt, scope.pages, scope.count = now, result.pages, len(result.items)
-        scope.complete, scope.cursor, scope.status = result.complete, result.cursor, result.error or "ok"
+        scope.complete, scope.status = result.complete, result.error or "ok"
+        if (
+            not scope.baseline
+            and not resumed
+            and not result.pages
+            and not result.items
+            and result.error in {"resource_unavailable", "404"}
+        ):
+            scope.status = "unsupported"
+        if not resumed:
+            scope.scan_started = now
+    submissions = result if isinstance(result, SubmissionPageResult) else None
     seen = set()
     for raw in result.items:
         external = raw.get("assignment_id") if kind == "submission" else raw.get("id")
@@ -63,6 +76,16 @@ async def apply_scope(
         # 子资源 ID 在不同父资源下允许重复。
         key = f"{kind}:{course_id}:{scope_suffix + ':' if scope_suffix else ''}{external}"
         seen.add(key)
+        if (
+            kind == "submission"
+            and not targeted
+            and (external in submissions.failed_detail_ids if submissions else not result.complete)
+        ) or (kind == "page" and not result.complete and "body" not in raw):
+            # 轻量清单可证明项目存在，但不能代替详情或为失败的详情建立基线。
+            resource = await session.get(Resource, key)
+            if resource and not targeted:
+                resource.last_listed = scope.scan_started
+            continue
         try:
             data = normalize(kind, raw, settings.canvas_base_url, course_id)
         except (ValueError, TypeError):
@@ -94,32 +117,66 @@ async def apply_scope(
                 for i, (event, changes) in enumerate(events):
                     await emit(session, settings, resource, event, changes, str(i), now, sync_run_id)
         else:
+            available_again = kind == "assignment" and resource.availability == "missing_unconfirmed"
             # 缺字段不等于 null；轻量响应不能抹掉以前的完整详情。
             merged = {**resource.data, **data}
             before = resource.data
             semantic_before = {k: v for k, v in before.items() if k != "_email"}
             semantic_after = {k: v for k, v in merged.items() if k != "_email"}
-            if semantic_before != semantic_after:
+            if semantic_before != semantic_after or available_again:
                 resource.version += 1
                 resource.data = merged
-                if scope.baseline:
+                if scope.baseline or (submissions and external in submissions.detail_ids):
                     for i, (event, changes) in enumerate(changes_for(kind, before, merged, user_id)):
                         await emit(session, settings, resource, event, changes, str(i), now, sync_run_id)
+                if available_again:
+                    await emit(
+                        session,
+                        settings,
+                        resource,
+                        "assignment_available_again",
+                        {},
+                        now=now,
+                        sync_run_id=sync_run_id,
+                    )
             resource.data = merged
             resource.last_seen, resource.missing_count, resource.availability = now, 0, "visible"
+        if not targeted:
+            resource.last_listed = scope.scan_started
     if targeted:
         return scope
     if scope.complete:
         rows = (await session.scalars(select(Resource).where(Resource.scope == scope_key))).all()
         for resource in rows:
-            if resource.key not in seen:
+            if resource.key not in seen and (not resumed or resource.last_listed != scope.scan_started):
                 resource.missing_count += 1
+                was_visible = resource.availability == "visible"
                 resource.availability = "missing_unconfirmed"
                 # 清单缺失不足以证明删除；保留快照，永不直接发删除通知。
+                if kind == "assignment" and was_visible:
+                    resource.version += 1
+                    await emit(
+                        session,
+                        settings,
+                        resource,
+                        "assignment_unavailable",
+                        {"last_seen": resource.last_seen.isoformat()},
+                        now=now,
+                        sync_run_id=sync_run_id,
+                    )
         scope.baseline, scope.last_success = True, now
-    scope.next_attempt = now + timedelta(
-        seconds=settings.poll_seconds if scope.status == "ok" else max(settings.poll_seconds, 300)
+    if result.continues and scope.status not in {"schema_changed", "data_quality_error", "unsupported"}:
+        scope.cursor, scope.scan_urls = result.cursor, result.scan_urls
+    else:
+        scope.cursor, scope.scan_urls, scope.scan_started = None, None, None
+    delay = (
+        timedelta(hours=24)
+        if scope.status == "unsupported"
+        else timedelta(
+            seconds=settings.poll_seconds if scope.status == "ok" else max(settings.poll_seconds, 300)
+        )
     )
+    scope.next_attempt = now + delay
     return scope
 
 

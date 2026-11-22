@@ -1,12 +1,20 @@
 import hashlib
+import html
 import json
 import re
-from urllib.parse import urlsplit
+from functools import partial
+from urllib.parse import urljoin, urlsplit
 
 import bleach
+from bleach.html5lib_shim import Filter
 
 from canvas_notifier.domain.body_images import body_images
-from canvas_notifier.domain.mail_metadata import feedback_metadata, source_time
+from canvas_notifier.domain.mail_metadata import (
+    author_is_visible,
+    feedback_metadata,
+    is_secret_query_key,
+    source_time,
+)
 from canvas_notifier.domain.time import parse_time
 
 COMMON = {
@@ -40,6 +48,8 @@ FIELDS = {
         "only_visible_to_overrides",
         "is_quiz_assignment",
         "quiz_id",
+        "allowed_attempts",
+        "lock_explanation",
     },
     "submission": {
         "assignment_id",
@@ -54,6 +64,7 @@ FIELDS = {
         "excused",
         "missing",
         "late",
+        "points_deducted",
         "redo_request",
         "grade_matches_current_submission",
         "cached_due_date",
@@ -77,11 +88,85 @@ FIELDS = {
     },
     "module_item": {"type", "content_id", "completion_requirement"},
     "page": {"url", "updated_at", "editing_roles"},
-    "calendar": {"all_day", "all_day_date", "location_name", "context_code"},
+    "calendar": {"all_day", "all_day_date", "location_name", "location_address", "context_code"},
     "planner": {"plannable_id", "plannable_type", "plannable_date", "plannable", "submissions"},
     "planner_note": {"todo_date", "details"},
 }
 TEXT_FIELDS = {"description", "body", "message", "details"}
+BODY_RESOURCES = {"assignment", "announcement", "discussion", "page", "calendar", "planner_note"}
+_FORMATTING_TAGS = {"sup", "sub", "s", "u", "hr"}
+_TEXT_TAGS = {"p", "br", "b", "strong", "em", "ul", "ol", "li", "blockquote", "code"} | _FORMATTING_TAGS
+_EMAIL_TAGS = _TEXT_TAGS | {
+    "pre",
+    "h2",
+    "h3",
+    "h4",
+    "table",
+    "thead",
+    "tbody",
+    "tr",
+    "th",
+    "td",
+    "caption",
+    "a",
+}
+_BACKFILL_FIELDS = {
+    "content_images",
+    "links",
+    "attachments",
+    "rubric",
+    "allowed_attempts",
+    "lock_explanation",
+    "location_address",
+    "points_deducted",
+}
+_SUBMISSION_STATUS = {"missing", "late", "excused", "points_deducted"}
+_NESTED_BACKFILL_FIELDS = {"attachments", "media_comment", "links", "content_images"}
+_BACKFILL_FORMAT = re.compile(r"</?(?:" + "|".join(sorted(_FORMATTING_TAGS)) + r")>")
+
+
+def _origin(url):
+    port = url.port
+    return url.scheme, url.hostname, 443 if port is None else port
+
+
+def sanitize_link(value: str | None, origin: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    value = value.strip()
+    if "\\" in value or re.search(r"[\x00-\x1f\x7f]", value):
+        return ""
+    try:
+        parsed = urlsplit(urljoin(origin + "/", value))
+        if (
+            parsed.scheme == "https"
+            and parsed.hostname
+            and parsed.username is None
+            and parsed.password is None
+        ):
+            same_origin = _origin(parsed) == _origin(urlsplit(origin))
+        elif parsed.scheme == "mailto" and not parsed.netloc and parsed.path:
+            same_origin = False
+        else:
+            return ""
+    except ValueError:
+        return ""
+
+    # 百分号编码、大小写与分隔符不能让鉴权参数漏进邮件。
+    terms = re.split(r"[&;]", parsed.query)
+    public = [term for term in terms if not is_secret_query_key(term.partition("=")[0])]
+    secret_fragment = any(
+        "=" in term and is_secret_query_key(term.partition("=")[0])
+        for term in re.split(r"[?&;]", parsed.fragment)
+    )
+    if len(public) != len(terms) or secret_fragment:
+        if not same_origin:
+            return ""
+        return parsed._replace(
+            query=parsed.query if len(public) == len(terms) else "&".join(public),
+            fragment="" if secret_fragment else parsed.fragment,
+        ).geturl()
+    return parsed.geturl()
 
 
 def safe_link(value: str | None, origin: str) -> str:
@@ -101,69 +186,129 @@ def safe_link(value: str | None, origin: str) -> str:
 def clean_html(value: str) -> str:
     return bleach.clean(
         value,
-        tags={"p", "br", "b", "strong", "em", "ul", "ol", "li", "blockquote", "code"},
+        tags=_TEXT_TAGS,
         attributes={},
         protocols=[],
         strip=True,
     )
 
 
-def clean_email_html(value: str) -> str:
-    from urllib.parse import parse_qsl
+class _LinkFilter(Filter):
+    def __init__(self, source, *, origin, links):
+        super().__init__(source)
+        self.origin = origin
+        self.origin_key = _origin(urlsplit(origin))
+        self.links = links
 
-    def allow_attribute(tag, name, value):
-        if tag == "a" and name == "href":
-            parsed = urlsplit(value)
-            return (
-                not parsed.username
-                and not parsed.password
-                and not any(
-                    k.lower()
-                    in {"access_token", "token", "session_token", "code", "state", "verifier", "signature"}
-                    for k, _ in parse_qsl(parsed.query)
-                )
-            )
-        return (tag == "a" and name == "title") or (tag in {"td", "th"} and name in {"colspan", "rowspan"})
+    def __iter__(self):
+        for token in self.source:
+            if token["type"] in ("StartTag", "EmptyTag") and token["name"] == "a":
+                attrs = token["data"]
+                key = (None, "href")
+                if key in attrs:
+                    target = sanitize_link(html.unescape(attrs[key]), self.origin)
+                    if target:
+                        attrs[key] = target
+                        if self.links is not None and _origin(urlsplit(target)) == self.origin_key:
+                            self.links.add(target)
+                    else:
+                        del attrs[key]
+            yield token
 
-    return bleach.clean(
-        value,
-        tags={
-            "p",
-            "br",
-            "b",
-            "strong",
-            "em",
-            "ul",
-            "ol",
-            "li",
-            "blockquote",
-            "code",
-            "pre",
-            "h2",
-            "h3",
-            "h4",
-            "table",
-            "thead",
-            "tbody",
-            "tr",
-            "th",
-            "td",
-            "caption",
-            "a",
-        },
-        attributes=allow_attribute,
+
+def _clean_email_html(value, origin, links=None):
+    return bleach.Cleaner(
+        tags=_EMAIL_TAGS,
+        attributes={"a": ["href", "title"], "td": ["colspan", "rowspan"], "th": ["colspan", "rowspan"]},
         protocols=["https", "mailto"],
         strip=True,
+        filters=[partial(_LinkFilter, origin=origin, links=links)],
+    ).clean(value)
+
+
+def clean_email_html(value: str, origin: str) -> str:
+    return _clean_email_html(value, origin)
+
+
+def _attachments(data):
+    items = list(data.get("attachments") or [])
+    if isinstance(data.get("attachment"), dict):
+        items.append(data["attachment"])
+    return sorted(
+        (
+            {
+                "id": item.get("id"),
+                "display_name": item.get("display_name") or item.get("filename"),
+                "size": item.get("size"),
+            }
+            for item in items
+            if isinstance(item, dict)
+        ),
+        key=lambda item: tuple(str(item[key]) for key in ("id", "display_name", "size")),
     )
 
 
+def _rubric(criteria):
+    return [
+        {
+            **{k: row.get(k) for k in ("id", "description", "long_description", "points")},
+            "ratings": [
+                {k: rating.get(k) for k in ("id", "description", "points")}
+                for rating in row.get("ratings") or []
+            ],
+        }
+        for row in criteria or []
+    ]
+
+
+def _author_name(data, author):
+    author = author if isinstance(author, dict) else {}
+    if not author_is_visible(data, author):
+        return ""
+    return (
+        author.get("display_name")
+        or data.get("user_name")
+        or author.get("name")
+        or author.get("full_name")
+        or ""
+    )
+
+
+def _message_author_name(message, participants):
+    author = message.get("author")
+    author = author if isinstance(author, dict) else {}
+    if not author_is_visible(message, author):
+        return ""
+    participant = participants.get(str(message.get("author_id")), {})
+    if not author_is_visible(message, participant):
+        return ""
+    return (
+        author.get("display_name")
+        or participant.get("display_name")
+        or participant.get("name")
+        or participant.get("full_name")
+        or message.get("user_name")
+        or ""
+    )
+
+
+def _email_body(raw, origin, links=None):
+    text, images = body_images(raw, origin)
+    return _clean_email_html(text, origin, links), images
+
+
 def normalize(kind: str, data: dict, origin: str, course_id="") -> dict:
-    raw_body = data.get("message") or data.get("description") or data.get("body") or ""
-    email_body, images = body_images(raw_body, origin)
-    result = {k: v for k, v in data.items() if k in COMMON | FIELDS.get(kind, set())}
+    raw_body = data.get("message") or data.get("description") or data.get("body") or data.get("details") or ""
+    links = set() if kind in BODY_RESOURCES else None
+    email_body, images = _email_body(raw_body, origin, links)
+    attachments = _attachments(data)
+    fields = COMMON | FIELDS.get(kind, set())
+    result = {k: v for k, v in data.items() if k in fields}
     for key, value in list(result.items()):
-        if key in TEXT_FIELDS and isinstance(value, str):
+        if (key in TEXT_FIELDS or key == "lock_explanation") and isinstance(value, str):
             result[key] = clean_html(value)
+            if links is not None and key in TEXT_FIELDS and value and value != raw_body:
+                _clean_email_html(value, origin, links)
         if key.endswith("_at") or key in ("cached_due_date", "todo_date", "plannable_date"):
             if value is not None:
                 result[key] = parse_time(value).isoformat()
@@ -171,6 +316,24 @@ def normalize(kind: str, data: dict, origin: str, course_id="") -> dict:
             result[key] = str(value) if value is not None else None
     if any(key in data for key in TEXT_FIELDS):
         result["content_images"] = images
+    if links is not None:
+        result["links"], result["attachments"] = sorted(links), attachments
+    elif "attachments" in data:
+        result["attachments"] = attachments
+    if kind == "assignment" and "rubric" in data:
+        result["rubric"] = _rubric(data["rubric"])
+    email = result["_email"] = {
+        "course_id": str(data.get("course_id") or "") if kind == "planner" else course_id,
+        "source_created_at": source_time(data.get("created_at")),
+        "source_updated_at": source_time(data.get("updated_at")),
+        "source_modified_at": source_time(data.get("modified_at")),
+        "source_published_at": source_time(data.get("posted_at")),
+        "body": email_body,
+        "attachments": attachments,
+        "comments": {},
+    }
+    if kind in {"announcement", "discussion", "reply"}:
+        email["author_name"] = _author_name(data, data.get("author"))
     if kind == "course":
         result["term"] = (
             {k: data["term"].get(k) for k in ("id", "start_at", "end_at")} if data.get("term") else None
@@ -178,60 +341,69 @@ def normalize(kind: str, data: dict, origin: str, course_id="") -> dict:
         # 身份与个人成绩不混进课程指纹。
         result.pop("enrollments", None)
     if kind == "submission" and "submission_comments" in data:
-        result["submission_comments"] = sorted(
-            [
+        comments = []
+        for comment in data.get("submission_comments") or []:
+            raw_comment = comment.get("comment") or ""
+            body, content_images = _email_body(raw_comment, origin)
+            comment_attachments = _attachments(comment)
+            media = comment.get("media_comment")
+            comments.append(
                 {
-                    k: (str(v) if k in ("id", "author_id") else clean_html(v) if k == "comment" else v)
-                    for k, v in comment.items()
-                    if k in {"id", "author_id", "comment", "created_at"}
+                    **{
+                        k: (str(v) if k in ("id", "author_id") else v)
+                        for k, v in comment.items()
+                        if k in {"id", "author_id", "created_at"}
+                    },
+                    **({"comment": clean_html(raw_comment)} if "comment" in comment else {}),
+                    "attachments": comment_attachments,
+                    "content_images": content_images,
+                    "media_comment": {
+                        "media_type": media.get("media_type") or media.get("content-type"),
+                        "display_name": media.get("display_name"),
+                    }
+                    if isinstance(media, dict)
+                    else None,
                 }
-                for comment in data["submission_comments"] or []
-            ],
-            key=lambda c: c.get("id", ""),
-        )
+            )
+            if "id" in comment:
+                email["comments"][str(comment["id"])] = {
+                    **feedback_metadata(comment, origin),
+                    "body": body,
+                    "content_images": content_images,
+                    "attachments": comment_attachments,
+                }
+        result["submission_comments"] = sorted(comments, key=lambda c: c.get("id", ""))
     if kind == "conversation":
         result.pop("workflow_state", None)  # 读/未读变化不等于新消息。
         if "messages" in data:
-            result["messages"] = sorted(
-                [
+            participants = {str(p.get("id")): p for p in data.get("participants") or []}
+            messages = []
+            email["messages"] = {}
+            for message in data["messages"] or []:
+                message_id = str(message["id"])
+                raw_message = message.get("body") or ""
+                targets = set()
+                body, content_images = _email_body(raw_message, origin, targets)
+                messages.append(
                     {
-                        k: str(v) if k in ("id", "author_id") else clean_html(v) if k == "body" else v
-                        for k, v in m.items()
-                        if k in {"id", "author_id", "body", "created_at"}
+                        **{
+                            k: (str(v) if k in ("id", "author_id") else v)
+                            for k, v in message.items()
+                            if k in {"id", "author_id", "created_at"}
+                        },
+                        **({"body": clean_html(raw_message)} if "body" in message else {}),
+                        "links": sorted(targets),
+                        "attachments": _attachments(message),
                     }
-                    for m in data["messages"]
-                ],
-                key=lambda m: m["id"],
-            )
+                )
+                email["messages"][message_id] = {
+                    "author_name": _message_author_name(message, participants),
+                    "body": body,
+                    "content_images": content_images,
+                }
+            result["messages"] = sorted(messages, key=lambda m: m["id"])
     if kind == "planner" and isinstance(data.get("plannable"), dict):
         result["plannable"] = {k: v for k, v in data["plannable"].items() if k in {"id", "title", "due_at"}}
-    if "attachments" in data:
-        result["attachments"] = [
-            {k: a.get(k) for k in ("id", "display_name", "size")} for a in data["attachments"] or []
-        ]
-    attachments = list(data.get("attachments") or [])
-    if isinstance(data.get("attachment"), dict):
-        attachments.append(data["attachment"])
-    result["_email"] = {
-        "course_id": str(data.get("course_id") or "") if kind == "planner" else course_id,
-        "source_created_at": source_time(data.get("created_at")),
-        "source_updated_at": source_time(data.get("updated_at")),
-        "source_modified_at": source_time(data.get("modified_at")),
-        "source_published_at": source_time(data.get("posted_at")),
-        "body": clean_email_html(email_body),
-        "attachments": [{k: a.get(k) for k in ("id", "display_name", "size")} for a in attachments],
-        "comments": {
-            str(c["id"]): {
-                **feedback_metadata(c, origin),
-                "body": clean_email_html(c.get("comment") or ""),
-                "attachments": [
-                    {k: a.get(k) for k in ("id", "display_name", "size")} for a in c.get("attachments") or []
-                ],
-            }
-            for c in data.get("submission_comments") or []
-            if "id" in c
-        },
-    }
     link = safe_link(data.get("html_url"), origin)
     if not link and course_id.isdigit() and str(data.get("id", "")).isdigit() and kind == "assignment":
         link = f"{origin}/courses/{course_id}/assignments/{data['id']}"
@@ -282,12 +454,34 @@ def complete(assignment: dict, submission: dict, local: dict) -> bool:
     return bool(submission.get("submitted_at")) and not submission.get("missing", False)
 
 
-def changes_for(kind, before, after, user_id=""):
-    diff = {
-        k: {"before": before.get(k), "after": after.get(k)}
-        for k in after
-        if k != "_email" and before.get(k) != after.get(k) and not (k == "content_images" and k not in before)
+def _snapshot_diff(before, after, backfill_fields, *, old_format=False):
+    # 第一次保存新快照结构只补基线，后续变化才需要通知。
+    return {
+        key: {"before": before.get(key), "after": value}
+        for key, value in after.items()
+        if key != "_email"
+        and before.get(key) != value
+        and not (key in backfill_fields and key not in before)
+        and not (
+            old_format
+            and (key in TEXT_FIELDS or key == "comment")
+            and isinstance(value, str)
+            and before.get(key) == _BACKFILL_FORMAT.sub("", value)
+        )
     }
+
+
+def _nested_changed(before, after):
+    return before is None or bool(
+        _snapshot_diff(before, after, _NESTED_BACKFILL_FIELDS, old_format="attachments" not in before)
+    )
+
+
+def changes_for(kind, before, after, user_id=""):
+    old_format = ("links" in after and "links" not in before) or (
+        kind == "reply" and "author_name" not in before.get("_email", {})
+    )
+    diff = _snapshot_diff(before, after, _BACKFILL_FIELDS, old_format=old_format)
     if not diff:
         return []
     events = []
@@ -300,9 +494,14 @@ def changes_for(kind, before, after, user_id=""):
                     {"grade": {"before": old_grade, "after": new_grade}},
                 )
             )
+        status = {key: value for key, value in diff.items() if key in _SUBMISSION_STATUS}
+        if before and status:
+            events.append(("submission_status_changed", status))
         old_comments = {str(c["id"]): c for c in before.get("submission_comments", [])}
         for comment in after.get("submission_comments", []):
-            if str(comment.get("author_id")) != user_id and old_comments.get(str(comment["id"])) != comment:
+            if str(comment.get("author_id")) != user_id and _nested_changed(
+                old_comments.get(str(comment["id"])), comment
+            ):
                 events.append(
                     (
                         "submission_comment_added"
@@ -320,7 +519,9 @@ def changes_for(kind, before, after, user_id=""):
     elif kind == "conversation":
         old_messages = {str(m["id"]): m for m in before.get("messages", [])}
         for message in after.get("messages", []):
-            if str(message.get("author_id")) != user_id and old_messages.get(str(message["id"])) != message:
+            if str(message.get("author_id")) != user_id and _nested_changed(
+                old_messages.get(str(message["id"])), message
+            ):
                 events.append(("conversation_message_added", {"message": message}))
     elif kind == "reply" and str(after.get("user_id")) == user_id:
         return []

@@ -1,14 +1,13 @@
 """邮件信息模型：保留 Canvas 通知要素，并补充本服务的时间、状态与审计信息。"""
 
-import html
 import re
 from html.parser import HTMLParser
-from urllib.parse import quote, urljoin, urlsplit
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
-from canvas_notifier.delivery.formatting import format_changes
+from canvas_notifier.delivery.formatting import format_changes, readable
 from canvas_notifier.domain.mail_metadata import visible_email, visible_url
-from canvas_notifier.domain.normalize import clean_email_html, safe_link
+from canvas_notifier.domain.normalize import clean_email_html, safe_link, sanitize_link
 from canvas_notifier.domain.time import now_utc, parse_time
 
 
@@ -109,14 +108,6 @@ def email_body_text(fragment):
     return re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", "".join(parser.parts)).strip()
 
 
-def canvas_link(value, origin):
-    url = urljoin(origin + "/", value)
-    parsed, base = urlsplit(url), urlsplit(origin)
-    if (parsed.scheme, parsed.netloc) == (base.scheme, base.netloc) and not parsed.username:
-        return origin + parsed.path
-    return value
-
-
 def present(payload, *, now=None):
     now = now or now_utc()
     p = dict(payload)
@@ -145,25 +136,12 @@ def present(payload, *, now=None):
     )
     p["observed_display"] = timestamp(p.get("observed_at")) if p.get("observed_at") else "未记录"
     p["rendered_display"] = timestamp(now.isoformat())
-    p["changes_text"] = format_changes(p.get("changes") or {}, p.get("timezone", "Asia/Shanghai"))
-    origin = p.get("canvas_origin") or "https://" + (
-        urlsplit(p.get("link") or "https://canvas.tongji.edu.cn").netloc
+    origin = p.get("canvas_origin") or "https://canvas.tongji.edu.cn"
+    p["link"] = sanitize_link(p.get("link"), origin)
+    p["changes_text"] = format_changes(
+        p.get("changes") or {}, p.get("timezone", "Asia/Shanghai"), rubric=p.get("rubric", [])
     )
-    # Canvas 站内链接去掉临时签名参数后保留，登录 Canvas 后仍可打开；站外凭据链接仍剔除。
-    p["excerpt"] = re.sub(
-        r'href="([^"]*)"',
-        lambda match: 'href="' + html.escape(canvas_link(html.unescape(match[1]), origin), quote=True) + '"',
-        p.get("excerpt") or "",
-    )
-    p["excerpt"] = clean_email_html(p["excerpt"])
-    # 上游邮件会把课程正文中的相对链接补成绝对地址，邮箱中不能保留站内相对路径。
-    p["excerpt"] = re.sub(
-        r'href="([^"]*)"',
-        lambda match: (
-            'href="' + html.escape(urljoin(origin + "/", html.unescape(match[1])), quote=True) + '"'
-        ),
-        p["excerpt"],
-    )
+    p["excerpt"] = clean_email_html(p.get("excerpt") or "", origin)
     p["excerpt_text"] = email_body_text(p["excerpt"])
     kind = p.get("kind", "")
     descriptions = {
@@ -171,6 +149,8 @@ def present(payload, *, now=None):
         "assignment_content_changed": "这项任务的内容发生了变化。请留意老师更新后的要求。",
         "assignment_order_changed": "作业在课程列表中的排序位置调整了，未据此认定题目正文或截止时间改变。",
         "assignment_access_changed": "作业的发布、隐藏或锁定状态发生变化，请留意是否仍能访问或提交。",
+        "assignment_unavailable": "这项作业暂未出现在 Canvas 作业列表中。老师可能撤回了发布或删除了作业；相关提醒已取消。",
+        "assignment_available_again": "这项作业已重新出现在 Canvas 作业列表中，提醒已按当前规则恢复。",
         "assignment_dates_changed": "任务时间已经调整，提醒计划会按新的时间重新计算。",
         "grade_published": "这项任务的成绩已对你可见。",
         "grade_changed": "学生可见成绩发生了变化。",
@@ -180,7 +160,9 @@ def present(payload, *, now=None):
         "file_changed": "课程文件的名称、位置或元数据发生了变化。",
         "submission_comment_added": "老师或其他可见作者添加了新的提交反馈。",
         "submission_comment_changed": "提交反馈已更新。",
+        "rubric_changed": "这项任务的评分量表有更新，具体评分见下方。",
         "submission_confirmed": "检测到你已经向 Canvas 提交了这项任务。",
+        "submission_status_changed": "Canvas 更新了这项任务的提交状态，具体变化见下方。",
         "resubmission_requested": "老师要求重新提交，请再次检查作业要求。",
         "due": "任务即将到达正式截止时间。",
         "lock": "任务即将停止接受提交，请留意可用期结束时间。",
@@ -197,6 +179,20 @@ def present(payload, *, now=None):
         "module_item_created": "课程模块新增了一个内容入口；同名文件或作业的关联记录已放在一起。",
     }
     p["explanation"] = descriptions.get(kind, "检测到课程内容或服务状态发生以下变化。")
+    is_file = p.get("resource_kind") == "file" or kind in ("file_created", "file_changed")
+    is_assignment_or_submission = (
+        p.get("is_assignment")
+        or p.get("resource_kind") in ("assignment", "submission")
+        or kind.startswith(("assignment_", "submission_", "grade_"))
+        or kind in ("rubric_changed", "resubmission_requested")
+    )
+    p["source_note"] = (
+        "系统发现时间不等于老师上传或修改时间。"
+        if is_file
+        else "提交状态以最近同步为准。"
+        if is_assignment_or_submission
+        else ""
+    )
     p["facts"] = []
     for key, label in [
         ("due_at", "正式截止"),
@@ -204,6 +200,9 @@ def present(payload, *, now=None):
         ("unlock_at", "开放时间"),
         ("personal_at", "个人计划"),
         ("submitted_at", "提交时间"),
+        ("start_at", "开始时间"),
+        ("end_at", "结束时间"),
+        ("todo_date", "待办日期"),
     ]:
         if p.get(key):
             p["facts"].append((label, timestamp(p[key])))
@@ -211,7 +210,16 @@ def present(payload, *, now=None):
         if not p.get("due_at"):
             p["facts"].append(("正式截止", "老师未设置"))
         p["facts"].append(("提交状态", submission_status(p)))
-    if p.get("resource_kind") == "file" or p.get("kind") in ("file_created", "file_changed"):
+        if (attempts := p.get("allowed_attempts")) is not None:
+            p["facts"].append(("允许尝试次数", "不限" if attempts == -1 else str(attempts)))
+        if p.get("lock_explanation"):
+            explanation = email_body_text(clean_email_html(p["lock_explanation"], origin))
+            if explanation:
+                p["facts"].append(("锁定说明", explanation))
+    for key, label in (("location_name", "地点"), ("location_address", "地点地址")):
+        if p.get(key):
+            p["facts"].append((label, p[key]))
+    if is_file:
         for key, label in (
             ("source_created_at", "上传/创建时间"),
             ("source_modified_at", "文件修改时间"),
@@ -226,10 +234,11 @@ def present(payload, *, now=None):
         if p.get(key):
             p["facts"].append((label, timestamp(p[key])))
     if p.get("score") is not None:
-        score = f"{p['score']:g}" if isinstance(p["score"], int | float) else str(p["score"])
+        score = readable(p["score"], zone.key)
         total = p.get("points_possible")
-        p["facts"].append(("得分", f"{score} / {total:g}" if isinstance(total, int | float) else score))
-    if p.get("grade") not in (None, "") and str(p["grade"]) != str(p.get("score")).removesuffix(".0"):
+        score_fact = f"{score} / {readable(total, zone.key)}" if isinstance(total, int | float) else score
+        p["facts"].append(("得分", score_fact))
+    if p.get("grade") not in (None, "") and str(p["grade"]) != readable(p.get("score"), zone.key):
         p["facts"].append(("成绩", str(p["grade"])))
     if p.get("points_possible") is not None:
         p["facts"].append(("满分", str(p["points_possible"])))
@@ -254,14 +263,18 @@ def present(payload, *, now=None):
     }.get(p.get("media_kind"), "")
     p["media_name"] = p.get("media_name") or ""
     p["action_text"] = (
-        "查看提交与反馈"
+        "查看提交与状态"
+        if kind == "submission_status_changed"
+        else "查看课程"
+        if kind == "assignment_unavailable"
+        else "查看提交与反馈"
         if p.get("resource_kind") == "submission" or kind.startswith("submission_comment")
         else "查看文件"
         if kind.startswith("file_")
         else "查看公告"
         if kind.startswith("announcement_")
         else "查看作业"
-        if p.get("is_assignment")
+        if p.get("is_assignment") or kind == "assignment_available_again"
         else "在 Canvas 中查看"
     )
     p["attachments"] = [

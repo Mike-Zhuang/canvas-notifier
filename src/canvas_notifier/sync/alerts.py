@@ -6,8 +6,13 @@ from canvas_notifier.db import Delivery, Health
 from canvas_notifier.delivery.queue import enqueue
 from canvas_notifier.domain.time import now_utc, parse_time
 
+OWNER_ACTION = frozenset(
+    {"iam_interaction_required", "reauth_required", "iam_credentials_missing", "iam_rejected"}
+)
+
 
 async def observe_sync(session, settings, failures, *, now=None):
+    failures = [failure for failure in failures if failure["status"] != "unsupported"]
     now = now or now_utc()
     row = await session.get(Health, "sync_alert")
     if row is None:
@@ -20,13 +25,13 @@ async def observe_sync(session, settings, failures, *, now=None):
         state.setdefault("first_failure", now.isoformat())
         state["affected"] = failures
         elapsed = (now - parse_time(state["first_failure"])).total_seconds()
-        if (
-            not state.get("notified")
-            and state["failures"] >= settings.sync_alert_failures
+        if not state.get("notified") and (
+            any(failure["status"] in OWNER_ACTION for failure in failures)
+            or state["failures"] >= settings.sync_alert_failures
             and elapsed >= settings.sync_alert_seconds
         ):
             incident = "sync-incident:" + state["first_failure"]
-            await enqueue(
+            result = await enqueue(
                 session,
                 settings,
                 incident,
@@ -36,12 +41,12 @@ async def observe_sync(session, settings, failures, *, now=None):
                     "连续失败轮数": state["failures"],
                     "开始时间": state["first_failure"],
                     "受影响范围": failures,
-                    "后续重试": "每 5 分钟重试，IAM 临时错误遵循独立退避；需要验证时等待本人处理",
+                    "后续重试": "遵循同步退避与服务端 Retry-After；需要验证时等待本人处理",
                 },
                 now=now,
             )
-            state["notified"] = True
-            state["incident"] = incident
+            if result == "queued":
+                state["notified"], state["incident"] = True, incident
         row.status = "alerting" if state.get("notified") else "watching"
     else:
         state["successes"] = state.get("successes", 0) + 1

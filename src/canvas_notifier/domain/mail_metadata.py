@@ -1,12 +1,12 @@
 """仅补充 API 实际可见的邮件信息；不额外请求作者资料，也不保存媒体鉴权地址。"""
 
-from urllib.parse import parse_qsl, urljoin, urlsplit
+from urllib.parse import unquote_plus, urljoin, urlsplit
 
 from email_validator import EmailNotValidError, validate_email
 
 from canvas_notifier.domain.time import parse_time
 
-SECRET_QUERY_KEYS = {
+_SECRET_QUERY_KEYS = {
     "access_token",
     "accesstoken",
     "token",
@@ -17,14 +17,22 @@ SECRET_QUERY_KEYS = {
     "signature",
     "sig",
     "key",
+    "expires",
+    "policy",
+    "key-pair-id",
 }
+
+
+def is_secret_query_key(key):
+    key = unquote_plus(key).lower()
+    return key in _SECRET_QUERY_KEYS or key.startswith(("x-amz-", "x-oss-"))
 
 
 def visible_url(value, origin):
     if not isinstance(value, str) or not value:
         return ""
-    url = urljoin(origin + "/", value)
     try:
+        url = urljoin(origin + "/", value)
         parsed = urlsplit(url)
         if (
             parsed.scheme != "https"
@@ -35,8 +43,7 @@ def visible_url(value, origin):
         ):
             return ""
         if any(
-            key.lower() in SECRET_QUERY_KEYS or key.lower().startswith(("x-amz-", "x-oss-"))
-            for key, _ in parse_qsl(parsed.query)
+            is_secret_query_key(term.partition("=")[0]) for term in parsed.query.replace(";", "&").split("&")
         ):
             return ""
         if "/images/thumbnails/" in parsed.path:
@@ -65,13 +72,19 @@ def source_time(value):
         return None
 
 
+def author_is_visible(data, author):
+    return (
+        data.get("can_read_author") is not False
+        and not data.get("anonymous")
+        and not data.get("anonymous_state")
+        and not author.get("anonymous")
+        and author.get("can_read_author") is not False
+    )
+
+
 def feedback_metadata(comment, origin):
     author = comment.get("author") if isinstance(comment.get("author"), dict) else {}
-    readable = (
-        comment.get("can_read_author") is not False
-        and not comment.get("anonymous")
-        and not author.get("anonymous")
-    )
+    readable = author_is_visible(comment, author)
     media = comment.get("media_comment") if isinstance(comment.get("media_comment"), dict) else {}
     content_type = media.get("media_type") or media.get("content-type") or ""
     media_kind = (
