@@ -40,7 +40,9 @@ def render_message(settings, delivery, *, payload=None, inline_images=None):
         html_part = message.get_body(preferencelist=("html",))
         assert isinstance(html_part, EmailMessage)
         for cid, (content, subtype) in embedded.items():
-            html_part.add_related(content, maintype="image", subtype=subtype, cid=f"<{cid}>", disposition="inline")
+            html_part.add_related(
+                content, maintype="image", subtype=subtype, cid=f"<{cid}>", disposition="inline"
+            )
     return message
 
 

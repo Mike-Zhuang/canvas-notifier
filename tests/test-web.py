@@ -170,14 +170,31 @@ async def test_overview_course_and_incomplete_filters(settings, sessions):
                 data["lock_at"] = past
             if name == "other":
                 data["due_at"] = future
-            db.add(Resource(key=f"assignment:{cid}:{name}", kind="assignment", external_id=name,
-                            course_id=cid, scope=f"{cid}:assignments", data=data, local=local))
-            db.add(Resource(key=f"submission:{cid}:{name}", kind="submission", external_id=name,
-                            course_id=cid, scope=f"{cid}:submissions", data=sub))
+            db.add(
+                Resource(
+                    key=f"assignment:{cid}:{name}",
+                    kind="assignment",
+                    external_id=name,
+                    course_id=cid,
+                    scope=f"{cid}:assignments",
+                    data=data,
+                    local=local,
+                )
+            )
+            db.add(
+                Resource(
+                    key=f"submission:{cid}:{name}",
+                    kind="submission",
+                    external_id=name,
+                    course_id=cid,
+                    scope=f"{cid}:submissions",
+                    data=sub,
+                )
+            )
 
     def task_names(response):
         assert response.status_code == 200
-        return set(re.findall(r'<h3>([^<]+)</h3>', response.text)) & {c[0] for c in cases}
+        return set(re.findall(r"<h3>([^<]+)</h3>", response.text)) & {c[0] for c in cases}
 
     app = create_app(settings, sessions)
     async with httpx.AsyncClient(
@@ -190,10 +207,19 @@ async def test_overview_course_and_incomplete_filters(settings, sessions):
         assert task_names(await client.get("/?course=2")) == {"other"}
         assert task_names(await client.get("/?course=1&status=all&q=submitted")) == {"submitted"}
         assert task_names(await client.get("/?course=1&show=future")) == {
-            "pending", "redo", "missing", "external", "overdue"
+            "pending",
+            "redo",
+            "missing",
+            "external",
+            "overdue",
         }
         assert task_names(await client.get("/?course=1&show=all")) == {
-            "pending", "redo", "missing", "external", "overdue", "closed"
+            "pending",
+            "redo",
+            "missing",
+            "external",
+            "overdue",
+            "closed",
         }
         assert task_names(await client.get("/?course=3&term=all")) == {"old"}
         assert task_names(await client.get("/?status=all&show=all&term=all")) == {c[0] for c in cases}
