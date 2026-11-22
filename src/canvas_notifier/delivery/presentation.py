@@ -70,6 +70,9 @@ def submission_status(data):
         return "缺交"
     if data.get("submitted_at"):
         return "已检测到在线提交（迟交）" if data.get("late") else "已检测到在线提交"
+    # 线下考试等无在线提交的任务，老师给出可见成绩即说明已完成评定。
+    if data.get("score") is not None or data.get("grade") not in (None, ""):
+        return "老师已评分"
     return "尚未确认完成，请以 Canvas 当前状态为准"
 
 

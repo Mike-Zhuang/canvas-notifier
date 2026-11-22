@@ -76,6 +76,8 @@ def test_deadline_details_and_visible_grade(settings):
     assert "不展示" not in grade["explanation"]
     assert ("得分", "99 / 100") in grade["facts"] and ("成绩", "A") in grade["facts"]
     assert ("提交状态", "已检测到在线提交（迟交）") in grade["facts"]
+    paper = present(payload(kind="grade_published", score=99.0, points_possible=100.0, is_assignment=True))
+    assert ("提交状态", "老师已评分") in paper["facts"]
 
 
 def test_canvas_body_links_keep_path_without_signature():
