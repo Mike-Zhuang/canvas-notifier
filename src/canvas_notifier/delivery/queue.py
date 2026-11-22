@@ -210,6 +210,10 @@ async def enqueue(
         "excused": submission_data.get("excused", False),
         "redo_request": submission_data.get("redo_request", False),
         "points_possible": task_data.get("points_possible"),
+        "score": submission_data.get("score"),
+        "grade": submission_data.get("grade"),
+        "late": submission_data.get("late", False),
+        "missing": submission_data.get("missing", False),
         "file_size": data.get("size") if resource and resource.kind == "file" else None,
         "filename": data.get("filename") if resource and resource.kind == "file" else None,
         "content_type": data.get("content-type") if resource and resource.kind == "file" else None,
@@ -240,7 +244,6 @@ async def enqueue(
         "timezone": rule.timezone,
         "no_due": kind == "lock" and not data.get("due_at"),
         "changes": changes or {},
-        "score_in_email": rule.score_in_email,
         "sources": sources,
         "reminder_keys": reminder_keys or [],
         "excerpt": comment_data.get("body")
@@ -252,9 +255,6 @@ async def enqueue(
         or "",
         "manage_url": settings.public_base_url.rstrip("/") + "/rules",
     }
-    # 默认分数不进入邮件载荷；保留私有事件审计中的原始差异。
-    if not rule.score_in_email and (kind.startswith("grade_") or kind == "rubric_changed"):
-        payload["changes"] = {}
     available = (
         now
         if kind == "test"

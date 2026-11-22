@@ -359,7 +359,6 @@ def create_app(settings=None, sessions=None):
                             for key in (
                                 "enabled",
                                 "only_incomplete",
-                                "score_in_email",
                                 "quiet_enabled",
                                 "overdue_enabled",
                                 "pinned",

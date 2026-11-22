@@ -49,7 +49,7 @@ def test_canvas_parity_and_extra_information(settings):
     assert "<table>" in html and "<img" not in html
 
 
-def test_deadline_details_and_grade_privacy(settings):
+def test_deadline_details_and_visible_grade(settings):
     now = now_utc()
     p = present(
         payload(
@@ -62,8 +62,33 @@ def test_deadline_details_and_grade_privacy(settings):
         now=now,
     )
     assert "2 小时" in p["remaining"] and ("正式截止", "老师未设置") in p["facts"]
-    grade = present(payload(kind="grade_published", score_in_email=False))
-    assert "不展示具体分数" in grade["explanation"]
+    grade = present(
+        payload(
+            kind="grade_published",
+            score=99.0,
+            grade="A",
+            points_possible=100.0,
+            late=True,
+            submitted_at=now.isoformat(),
+            is_assignment=True,
+        )
+    )
+    assert "不展示" not in grade["explanation"]
+    assert ("得分", "99 / 100") in grade["facts"] and ("成绩", "A") in grade["facts"]
+    assert ("提交状态", "已检测到在线提交（迟交）") in grade["facts"]
+
+
+def test_canvas_body_links_keep_path_without_signature():
+    rendered = present(
+        payload(
+            excerpt=(
+                '<a href="/courses/1/files/3/download?verifier=secret">课件</a>'
+                '<a href="https://evil.test/x?token=secret">外站</a>'
+            )
+        )
+    )
+    assert 'href="https://canvas.tongji.edu.cn/courses/1/files/3/download"' in rendered["excerpt"]
+    assert "secret" not in rendered["excerpt"] and "evil.test" not in rendered["excerpt"]
 
 
 def test_mail_html_drops_tracking_images_and_credential_links():

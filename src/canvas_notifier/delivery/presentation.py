@@ -67,8 +67,10 @@ def submission_status(data):
         return "已在本服务标记完成（不代表已向 Canvas 提交）"
     if data.get("excused"):
         return "已豁免"
+    if data.get("missing"):
+        return "缺交"
     if data.get("submitted_at"):
-        return "已检测到在线提交"
+        return "已检测到在线提交（迟交）" if data.get("late") else "已检测到在线提交"
     return "尚未确认完成，请以 Canvas 当前状态为准"
 
 
@@ -107,6 +109,14 @@ def email_body_text(fragment):
     return re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", "".join(parser.parts)).strip()
 
 
+def canvas_link(value, origin):
+    url = urljoin(origin + "/", value)
+    parsed, base = urlsplit(url), urlsplit(origin)
+    if (parsed.scheme, parsed.netloc) == (base.scheme, base.netloc) and not parsed.username:
+        return origin + parsed.path
+    return value
+
+
 def present(payload, *, now=None):
     now = now or now_utc()
     p = dict(payload)
@@ -139,7 +149,13 @@ def present(payload, *, now=None):
     origin = p.get("canvas_origin") or "https://" + (
         urlsplit(p.get("link") or "https://canvas.tongji.edu.cn").netloc
     )
-    p["excerpt"] = clean_email_html(p.get("excerpt") or "")
+    # Canvas 站内链接去掉临时签名参数后保留，登录 Canvas 后仍可打开；站外凭据链接仍剔除。
+    p["excerpt"] = re.sub(
+        r'href="([^"]*)"',
+        lambda match: 'href="' + html.escape(canvas_link(html.unescape(match[1]), origin), quote=True) + '"',
+        p.get("excerpt") or "",
+    )
+    p["excerpt"] = clean_email_html(p["excerpt"])
     # 上游邮件会把课程正文中的相对链接补成绝对地址，邮箱中不能保留站内相对路径。
     p["excerpt"] = re.sub(
         r'href="([^"]*)"',
@@ -181,8 +197,6 @@ def present(payload, *, now=None):
         "module_item_created": "课程模块新增了一个内容入口；同名文件或作业的关联记录已放在一起。",
     }
     p["explanation"] = descriptions.get(kind, "检测到课程内容或服务状态发生以下变化。")
-    if kind.startswith("grade_") and not p.get("score_in_email"):
-        p["explanation"] += " 按当前隐私设置，邮件不展示具体分数。"
     p["facts"] = []
     for key, label in [
         ("due_at", "正式截止"),
@@ -211,6 +225,12 @@ def present(payload, *, now=None):
     for key, label in (("feedback_created_at", "反馈创建时间"), ("feedback_edited_at", "反馈编辑时间")):
         if p.get(key):
             p["facts"].append((label, timestamp(p[key])))
+    if p.get("score") is not None:
+        score = f"{p['score']:g}" if isinstance(p["score"], int | float) else str(p["score"])
+        total = p.get("points_possible")
+        p["facts"].append(("得分", f"{score} / {total:g}" if isinstance(total, int | float) else score))
+    if p.get("grade") not in (None, "") and str(p["grade"]) != str(p.get("score")).removesuffix(".0"):
+        p["facts"].append(("成绩", str(p["grade"])))
     if p.get("points_possible") is not None:
         p["facts"].append(("满分", str(p["points_possible"])))
     for key, label in (

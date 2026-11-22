@@ -83,11 +83,6 @@ async def applicable(session, delivery, now):
             return False, "事件已被当前规则关闭"
         if rule.recipients is not None and delivery.recipient not in recipients(",".join(rule.recipients)):
             return False, "收件人已从当前规则移除"
-        if not rule.score_in_email and (
-            delivery.payload.get("kind", "").startswith("grade_")
-            or delivery.payload.get("kind") == "rubric_changed"
-        ):
-            delivery.payload = {**delivery.payload, "changes": {}, "score_in_email": False}
         return True, ""
     resource = await session.get(Resource, delivery.resource_key)
     if not resource:
