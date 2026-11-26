@@ -121,8 +121,12 @@ NAMES = {
     "network_error": "网络连接失败",
     "resource_unavailable": "资源接口不可用",
     "resource_forbidden": "无权读取该资源",
-    "iam_interaction_required": "需要本人完成增强认证",
+    "iam_interaction_required": "IAM 要求验证码或增强认证，需本人完成",
     "iam_rejected": "IAM 拒绝登录",
+    "iam_login_page_missing": "未进入 IAM 登录页，已停止自动登录",
+    "iam_schema_changed": "IAM 返回无法识别的认证页面或响应，已停止自动登录",
+    "iam_network_error": "IAM 登录流程连接失败，将退避重试",
+    "iam_sso_network_error": "IAM 单点登录页提示网络异常，将退避重试",
     "iam_retry_cooldown": "等待 IAM 重试间隔",
 }
 

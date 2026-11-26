@@ -78,10 +78,11 @@ uv run canvas-notifier auth iam-test --force
 
 健康页中的 `iam` 显示：`attempting`、`session_saved`（交互会话已保存）、`ok`、`retry_wait`、`interaction_required` 或 `blocked`。
 
-- 临时网络/服务错误：默认 15 分钟后重试，指数退避，最长 6 小时。
+- 临时网络/服务错误：默认 15 分钟后重试，指数退避，最长 6 小时。密码通过后，如果 IAM 在 OAuth 授权步骤返回“网络异常，请稍后再试”的错误页，即使 HTTP 状态是 200，也不当作需要本人验证。
 - 密码拒绝或增强认证：停止重复提交。更新授权凭据文件、完成 `auth login --remember-iam` 或明确执行测试命令后才重新尝试。
 - 跨进程数据库租约防止同时登录；登录开始前保存冷却状态，进程中断不会立刻造成重试风暴。
 - 新 Cookie 只有通过普通 Canvas API 的再次校验后才替换旧文件；账号不一致或验证失败保留旧凭据与数据库。
+- IAM 轮换 Cookie 时，同名、同域、同路径的新值替换旧值。生产升级不需要删除旧 Cookie 文件；若旧版已将本次故障锁定为 `interaction_required`，部署后运行一次 `auth iam-test --force`，用原有凭据重新验证。
 - 需要本人处理的认证阻塞从第一次发生就进入统一的同步故障告警，同一事件不重复发信。
 
 ## 验收与边界

@@ -7,7 +7,9 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
+from email.message import Message
 from html.parser import HTMLParser
+from http.cookiejar import Cookie, CookieJar
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
 import httpx
@@ -17,17 +19,21 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from canvas_notifier.canvas.http import CanvasError
 from canvas_notifier.config import Settings, read_secret
 
-CANVAS = "https://canvas.tongji.edu.cn"
-IAM = "https://iam.tongji.edu.cn"
+CANVAS_HOST = "canvas.tongji.edu.cn"
+IAM_HOST = "iam.tongji.edu.cn"
+CANVAS = f"https://{CANVAS_HOST}"
+IAM = f"https://{IAM_HOST}"
 CALLBACK = CANVAS + "/login/oauth2/callback"
 PASSWORD_FORM = "authen1Form"
+_SSO_PATH = "/idp/profile/OAUTH2/AuthorizationCode/SSO"
+_SSO_NETWORK_MESSAGE = re.compile(r"\s*网络异常\s*[,，]\s*请稍后再试\s*")
 GET_PATHS = {
     CANVAS: {"/", "/login", "/login/openid_connect", "/login/oauth2/callback", "/api/v1/users/self"},
     IAM: {
         "/idp/oauth2/authorize",
         "/idp/AuthnEngine",
         "/idp/authcenter/ActionAuthChain",
-        "/idp/profile/OAUTH2/AuthorizationCode/SSO",
+        _SSO_PATH,
         "/idp/themes/default/js/main/crypt.js",
     },
 }
@@ -65,11 +71,44 @@ class LoginFormParser(HTMLParser):
             self.in_form = False
 
 
+class _SSOErrorParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.network_error = False
+        self.ignored = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style", "template"):
+            self.ignored.append(tag)
+
+    def handle_endtag(self, tag):
+        if self.ignored and tag == self.ignored[-1]:
+            self.ignored.pop()
+
+    def handle_data(self, data):
+        if not self.ignored and _SSO_NETWORK_MESSAGE.fullmatch(data):
+            self.network_error = True
+
+
+def _check_terminal_sso_page(response):
+    if response.url.host != IAM_HOST or response.url.path != _SSO_PATH:
+        return
+    content_type = response.headers.get("Content-Type", "").partition(";")[0].strip().lower()
+    # 只对已知 SSO 端点的 HTTP 200 HTML 识别已观察到的错误提示。
+    if response.status_code == 200 and content_type in ("text/html", "application/xhtml+xml"):
+        parser = _SSOErrorParser()
+        parser.feed(response.text)
+        parser.close()
+        if parser.network_error:
+            raise CanvasError("iam_sso_network_error")
+    raise CanvasError("iam_schema_changed")
+
+
 def parse_form(html, current_url):
     parser = LoginFormParser()
     parser.feed(html)
     if not parser.found or not {"j_username", "j_password", "authnLcKey"} <= parser.fields.keys():
-        raise CanvasError("iam_interaction_required")
+        raise CanvasError("iam_schema_changed")
     fields = parser.fields
     # authnLcKey 和认证链均来自本次登录页，绝不重用 HAR 中的历史值。
     chain = fields.get("spAuthChainCode")
@@ -111,19 +150,114 @@ def encrypt_password(script, password):
     return base64.b64encode(encrypted).decode("ascii")
 
 
-def cookie_records(jar, host="canvas.tongji.edu.cn"):
+def scoped_cookie_records(records, host):
+    """Select live cookies for one host; the last saved copy of a scope wins."""
+    selected = {}
+    now = time.time()
+    for record in records:
+        if record.get("domain") not in (host, f".{host}"):
+            continue
+        expires = record.get("expires")
+        if expires not in (None, -1) and expires <= now:
+            continue
+        selected[record.get("path") or "/", record["name"]] = record
+    return list(selected.values())
+
+
+def _saved_cookie(record):
+    domain = record["domain"]
+    dotted = domain.startswith(".")
+    path = record.get("path") or "/"
+    expires = record.get("expires")
+    if expires == -1:
+        expires = None
+    return Cookie(
+        version=0,
+        name=record["name"],
+        value=record["value"],
+        port=None,
+        port_specified=False,
+        domain=domain,
+        domain_specified=dotted,
+        domain_initial_dot=dotted,
+        path=path,
+        path_specified=True,
+        secure=record.get("secure", False),
+        expires=expires,
+        discard=expires is None,
+        comment=None,
+        comment_url=None,
+        rest={"HttpOnly": None} if record.get("httpOnly") else {},
+    )
+
+
+class _SetCookieHeader:
+    def __init__(self, value):
+        self.headers = Message()
+        self.headers["Set-Cookie"] = value
+
+    def info(self):
+        return self.headers
+
+
+class _SchoolCookieJar(CookieJar):
+    _response_host = None
+
+    def extract_cookies(self, response, request):
+        host = urlsplit(request.get_full_url()).hostname
+        if host not in (CANVAS_HOST, IAM_HOST):
+            return
+        domains = (host, f".{host}")
+        self._response_host = host
+        try:
+            # CookieJar applies expirations while parsing, so process each header
+            # in order instead of parsing the response and then storing all cookies.
+            for header in response.info().get_all("Set-Cookie", ()):
+                for cookie in self.make_cookies(_SetCookieHeader(header), request):
+                    if cookie.domain in domains:
+                        self.set_cookie_if_ok(cookie, request)
+        finally:
+            self._response_host = None
+
+    def set_cookie(self, cookie):
+        # The dotted form records Domain scope, but is not a separate identity
+        # for the same exact school host, path and cookie name.
+        other_domain = cookie.domain[1:] if cookie.domain.startswith(".") else f".{cookie.domain}"
+        self._clear_if_present(other_domain, cookie.path, cookie.name)
+        super().set_cookie(cookie)
+
+    def clear(self, domain=None, path=None, name=None):
+        host = self._response_host
+        if host is None:
+            return super().clear(domain, path, name)
+        # CookieJar calls clear() for an expired Set-Cookie before policy checks.
+        # It must not delete cookies for another host, and either form can match.
+        domains = (host, f".{host}")
+        if domain in domains:
+            for alias in domains:
+                self._clear_if_present(alias, path, name)
+
+    def _clear_if_present(self, domain, path, name):
+        try:
+            super().clear(domain, path, name)
+        except KeyError:
+            pass
+
+
+def cookie_records(jar, host=CANVAS_HOST):
+    now = time.time()
     return [
         {
             "name": c.name,
             "value": c.value,
-            "domain": host,
+            "domain": c.domain,
             "path": c.path or "/",
             "expires": c.expires if c.expires is not None else -1,
             "secure": c.secure,
-            "httpOnly": c.has_nonstandard_attr("HttpOnly"),
+            "httpOnly": any(key.lower() == "httponly" for key in c._rest),
         }
         for c in jar
-        if c.domain.lstrip(".") == host
+        if c.domain in (host, f".{host}") and not c.is_expired(now)
     ]
 
 
@@ -223,15 +357,17 @@ class IAMLogin:
         if not cookies:
             raise CanvasError("iam_canvas_cookie_missing")
         return LoginResult(
-            str(profile["id"]), cookies, self.trace, cookie_records(client.cookies.jar, "iam.tongji.edu.cn")
+            str(profile["id"]), cookies, self.trace, cookie_records(client.cookies.jar, IAM_HOST)
         )
 
     async def exchange(self, username, password):
         # 已保存的 IAM 会话优先尝试 SSO；仅在密码页才读取本地密码。
+        jar = _SchoolCookieJar()
         async with httpx.AsyncClient(
             timeout=20,
             follow_redirects=False,
             trust_env=False,
+            cookies=jar,
             transport=self.transport,
             headers={"User-Agent": "Mozilla/5.0 CanvasNotifier/0.1", "Accept-Language": "zh-CN,zh;q=0.9"},
         ) as client:
@@ -243,14 +379,8 @@ class IAMLogin:
                 )
             except (ValueError, TypeError):
                 raise CanvasError("iam_cookie_file_invalid") from None
-            for cookie in saved:
-                if cookie.get("domain", "").lstrip(".") != "iam.tongji.edu.cn":
-                    continue
-                if cookie.get("expires", -1) > 0 and cookie["expires"] <= time.time():
-                    continue
-                client.cookies.set(
-                    cookie["name"], cookie["value"], domain="iam.tongji.edu.cn", path=cookie.get("path", "/")
-                )
+            for cookie in scoped_cookie_records(saved, IAM_HOST):
+                jar.set_cookie(_saved_cookie(cookie))
             response = await self.follow(
                 client, await self.request(client, "GET", CANVAS + "/login/openid_connect")
             )
@@ -258,6 +388,7 @@ class IAMLogin:
                 return await self.verify_canvas(client)
             if urlsplit(str(response.url)).hostname != "iam.tongji.edu.cn" or not self.state:
                 raise CanvasError("iam_login_page_missing")
+            _check_terminal_sso_page(response)
             action, fields = parse_form(response.text, str(response.url))
             self.check_url(action, "POST")
             if username is None:
@@ -311,14 +442,16 @@ class IAMLogin:
                 raise CanvasError("iam_schema_changed") from None
             if not isinstance(result, dict):
                 raise CanvasError("iam_schema_changed")
-            if result.get("view") not in (None, "", "none"):
+            view = result.get("view")
+            if view == "biometrics":
                 raise CanvasError("iam_interaction_required")
-            if str(result.get("loginFailed")).lower() != "false":
-                raise CanvasError(
-                    "iam_rejected"
-                    if str(result.get("loginFailed")).lower() == "true"
-                    else "iam_schema_changed"
-                )
+            if view not in (None, "", "none"):
+                raise CanvasError("iam_schema_changed")
+            login_failed = str(result.get("loginFailed")).lower()
+            if login_failed == "true":
+                raise CanvasError("iam_rejected")
+            if login_failed != "false":
+                raise CanvasError("iam_schema_changed")
             # 密码已验证；HAR 的后续 AuthnEngine POST 不再含密码，只完成当前会话的认证跳转。
             finished = await self.request(
                 client,
@@ -329,5 +462,6 @@ class IAMLogin:
             )
             final = await self.follow(client, finished)
             if not self.callback_seen or urlsplit(str(final.url)).hostname != "canvas.tongji.edu.cn":
-                raise CanvasError("iam_interaction_required")
+                _check_terminal_sso_page(final)
+                raise CanvasError("iam_schema_changed")
             return await self.verify_canvas(client)

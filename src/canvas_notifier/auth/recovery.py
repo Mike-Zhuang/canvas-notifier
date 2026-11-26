@@ -14,7 +14,7 @@ REAUTH_ERRORS = {"auth_rejected", "login_html_returned", "bearer_missing", "cook
 BLOCKED_ERRORS = {
     "iam_credentials_missing",
     "iam_rejected",
-    "iam_interaction_required",
+    "iam_login_page_missing",
     "iam_schema_changed",
     "iam_state_mismatch",
     "iam_redirect_blocked",
@@ -73,7 +73,7 @@ async def recover_session(sessions, client, *, force=False, login_factory=IAMLog
             unchanged = previous.get("credential_revision") == revision
             if not force and unchanged:
                 if state.status == "interaction_required" or state.status == "blocked":
-                    raise CanvasError(previous.get("error", "iam_interaction_required"))
+                    raise CanvasError(previous.get("error") or "iam_schema_changed")
                 next_attempt = parse_time(previous.get("next_attempt"))
                 if next_attempt and now < next_attempt:
                     raise CanvasError("iam_retry_cooldown")

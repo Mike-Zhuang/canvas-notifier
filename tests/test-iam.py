@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+from datetime import timedelta
 from urllib.parse import parse_qs
 
 import httpx
@@ -14,11 +15,22 @@ from canvas_notifier.auth.recovery import recover_session
 from canvas_notifier.canvas.http import CanvasClient, CanvasError
 from canvas_notifier.config import read_secret, write_secret
 from canvas_notifier.db import Account, Delivery, Health
+from canvas_notifier.domain.time import now_utc
 from canvas_notifier.sync.service import bind_identity
 
 
 class School:
-    def __init__(self, *, captcha=False, view=None, wrong_state=False, foreign=False, rejected=False):
+    def __init__(
+        self,
+        *,
+        captcha=False,
+        view=None,
+        wrong_state=False,
+        foreign=False,
+        rejected=False,
+        login_page=None,
+        sso_response=None,
+    ):
         self.key = rsa.generate_private_key(public_exponent=65537, key_size=1024)
         self.captcha, self.view, self.wrong_state, self.foreign, self.rejected = (
             captcha,
@@ -27,6 +39,8 @@ class School:
             foreign,
             rejected,
         )
+        self.login_page = login_page
+        self.sso_response = sso_response
         self.calls = []
         self.password_posts = 0
 
@@ -59,6 +73,8 @@ class School:
                 302, headers={"Location": IAM + "/idp/authcenter/ActionAuthChain?authnLcKey=new-key"}
             )
         if path == "/idp/authcenter/ActionAuthChain" and request.method == "GET":
+            if self.login_page is not None:
+                return httpx.Response(200, html=self.login_page)
             page = """<form id="authen1Form" action="/idp/AuthnEngine?authnLcKey=new-key&amp;currentAuth=password"><input name="j_username"><input type="password" name="j_password"><input name="authnLcKey" value="new-key"><input name="j_checkcode" value="请输入验证码"><input name="op" value="login"><input name="spAuthChainCode" value=""></form><script>$("#spAuthChainCode1").val('abc123');</script>"""
             return httpx.Response(200, text=page)
         if path == "/idp/displayVerificationCode.do":
@@ -94,6 +110,8 @@ class School:
                 },
             )
         if path == "/idp/profile/OAUTH2/AuthorizationCode/SSO":
+            if self.sso_response is not None:
+                return self.sso_response
             return httpx.Response(
                 302,
                 headers={
@@ -162,6 +180,20 @@ async def test_saved_iam_sso_is_only_reused_when_explicitly_enabled(settings, re
     [
         ({"captcha": True}, "iam_interaction_required", 0),
         ({"view": "biometrics"}, "iam_interaction_required", 1),
+        ({"view": "unexpected-view"}, "iam_schema_changed", 1),
+        ({"login_page": "<p>验证码或增强认证</p>"}, "iam_schema_changed", 0),
+        ({"login_page": "<p>网络异常,请稍后再试</p>"}, "iam_schema_changed", 0),
+        ({"sso_response": httpx.Response(200, html="<p>未知单点登录结果</p>")}, "iam_schema_changed", 1),
+        (
+            {"sso_response": httpx.Response(200, html="<script>alert('网络异常,请稍后再试')</script>")},
+            "iam_schema_changed",
+            1,
+        ),
+        (
+            {"sso_response": httpx.Response(200, text="网络异常,请稍后再试")},
+            "iam_schema_changed",
+            1,
+        ),
         ({"rejected": True}, "iam_rejected", 1),
         ({"wrong_state": True}, "iam_state_mismatch", 1),
         ({"foreign": True}, "iam_redirect_blocked", 0),
@@ -173,8 +205,7 @@ async def test_fail_closed(settings, options, error, posts):
         await IAMLogin(settings, httpx.MockTransport(school)).login("synthetic-user", "synthetic-password")
     assert school.password_posts == posts
     assert all(host != "evil.example" for _, host, _ in school.calls)
-    if options.get("wrong_state"):
-        assert not any(path == "/login/oauth2/callback" for _, _, path in school.calls)
+    assert not any(path == "/login/oauth2/callback" for _, _, path in school.calls)
 
 
 @pytest.fixture
@@ -246,8 +277,17 @@ async def test_mismatch_does_not_overwrite_cookie_file(recovery_settings, sessio
     assert read_secret(recovery_settings.canvas_cookie_file) == before
 
 
-@pytest.mark.parametrize("code", ["iam_rejected", "iam_interaction_required", "iam_network_error"])
-async def test_persistent_block_or_cooldown(recovery_settings, sessions, code):
+@pytest.mark.parametrize(
+    "code,status",
+    [
+        ("iam_rejected", "blocked"),
+        ("iam_interaction_required", "interaction_required"),
+        ("iam_login_page_missing", "blocked"),
+        ("iam_schema_changed", "blocked"),
+        ("iam_network_error", "retry_wait"),
+    ],
+)
+async def test_persistent_block_or_cooldown(recovery_settings, sessions, code, status):
     class FailedLogin:
         count = 0
 
@@ -258,15 +298,58 @@ async def test_persistent_block_or_cooldown(recovery_settings, sessions, code):
             FailedLogin.count += 1
             raise CanvasError(code)
 
-    for _ in range(2):
+    for outcome in (code, "iam_retry_cooldown" if status == "retry_wait" else code):
         async with CanvasClient(recovery_settings, httpx.MockTransport(canvas_response)) as client:
-            with pytest.raises(CanvasError):
+            with pytest.raises(CanvasError, match=f"^{outcome}$"):
                 await recover_session(sessions, client, login_factory=FailedLogin)
     assert FailedLogin.count == 1
     async with sessions() as db:
+        state = await db.get(Health, "iam")
+        assert state.status == status
+        assert state.details["error"] == code
         notices = (await db.scalars(select(Delivery))).all()
         assert not notices  # 失败由同步持续故障窗口统一告警，避免双重发信。
     assert read_secret(recovery_settings.canvas_cookie_file) == "[]"
+
+
+@pytest.mark.parametrize("reuse_saved", [False, True])
+async def test_sso_network_page_retries_after_cooldown(recovery_settings, sessions, monkeypatch, reuse_saved):
+    settings = recovery_settings
+    settings.iam_use_saved_session = reuse_saved
+    if reuse_saved:
+        write_secret(
+            settings.iam_cookie_file,
+            json.dumps([{"name": "iam-sso", "value": "accepted", "domain": "iam.tongji.edu.cn"}]),
+        )
+    school = School(
+        sso_response=httpx.Response(
+            200, html="<title>错误信息</title><h1>统一身份认证</h1><p>提示：</p><p>网络异常,请稍后再试</p>"
+        )
+    )
+    clock = now_utc()
+    monkeypatch.setattr("canvas_notifier.auth.recovery.now_utc", lambda: clock)
+
+    def login_factory(config):
+        return IAMLogin(config, httpx.MockTransport(school))
+
+    async with CanvasClient(settings, httpx.MockTransport(canvas_response)) as client:
+        with pytest.raises(CanvasError, match="^iam_sso_network_error$"):
+            await recover_session(sessions, client, login_factory=login_factory)
+        async with sessions() as db:
+            state = await db.get(Health, "iam")
+            assert state.status == "retry_wait"
+            assert state.details["error"] == "iam_sso_network_error"
+        assert read_secret(settings.canvas_cookie_file) == "[]"
+        assert not any(path == "/login/oauth2/callback" for _, _, path in school.calls)
+        assert school.password_posts == (0 if reuse_saved else 1)
+        call_count = len(school.calls)
+        school.sso_response = None
+        with pytest.raises(CanvasError, match="^iam_retry_cooldown$"):
+            await recover_session(sessions, client, login_factory=login_factory)
+        assert len(school.calls) == call_count
+        clock += timedelta(seconds=settings.iam_retry_seconds)
+        assert await recover_session(sessions, client, login_factory=login_factory) == "42"
+    assert school.password_posts == (0 if reuse_saved else 2)
 
 
 @pytest.mark.parametrize("masked_cookie_failure", [False, True])

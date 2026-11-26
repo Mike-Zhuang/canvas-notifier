@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from canvas_notifier.auth.iam import IAM_HOST, scoped_cookie_records
 from canvas_notifier.canvas.http import CanvasClient, CanvasError
 from canvas_notifier.config import write_secret
 from canvas_notifier.db import Account, database
@@ -53,9 +54,7 @@ async def interactive_login(settings, *, remember_iam=False, timeout=600):
             finally:
                 await engine.dispose()
             host = urlsplit(settings.canvas_base_url).hostname
-            cookies = [
-                c for c in await context.cookies(settings.canvas_base_url) if c["domain"].lstrip(".") == host
-            ]
+            cookies = scoped_cookie_records(await context.cookies(settings.canvas_base_url), host)
             if not cookies:
                 raise CanvasError("cookie_missing")
             with tempfile.TemporaryDirectory(prefix="canvas-cookie-check-") as directory:
@@ -75,11 +74,8 @@ async def interactive_login(settings, *, remember_iam=False, timeout=600):
                     write_secret(settings.canvas_cookie_file, json.dumps(candidate))
                     iam_cookies = []
                     if remember_iam:
-                        iam_cookies = [
-                            c
-                            for c in await context.cookies("https://iam.tongji.edu.cn")
-                            if c["domain"].lstrip(".") == "iam.tongji.edu.cn"
-                        ]
+                        # A root-URL query omits cookies scoped to IAM routes such as /idp.
+                        iam_cookies = scoped_cookie_records(await context.cookies(), IAM_HOST)
                         write_secret(settings.iam_cookie_file, json.dumps(iam_cookies))
                         from canvas_notifier.auth.recovery import credential_revision
                         from canvas_notifier.sync.state import health
